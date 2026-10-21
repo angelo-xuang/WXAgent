@@ -43,6 +43,7 @@ modules/echotrace/windows/runner/go_decrypt.h
 
 # Generated app output and release packages
 output/
+outputs/
 release/
 dist/
 *.rar

@@ -115,7 +115,7 @@ class SessionMeta {
   final int? otherMessages;
   final int? activeDays;
   final int? firstMessage; // Unix timestamp
-  final int? lastMessage;  // Unix timestamp
+  final int? lastMessage; // Unix timestamp
 }
 
 class AnalysisResult {

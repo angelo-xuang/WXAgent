@@ -2,8 +2,11 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
+	"runtime"
+	"time"
 
 	"github.com/billyoftea/wxagent/go_backend/internal/pipeline"
 )
@@ -24,18 +27,23 @@ func New(p *pipeline.Pipeline) *Server {
 
 func (s *Server) Run(addr string) error {
 	log.Printf("Starting server on %s", addr)
-	return http.ListenAndServe(addr, s.mux)
+	return (&http.Server{
+		Addr: addr, Handler: s.mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       90 * time.Second,
+		// Streaming responses may run for minutes; avoid a fixed WriteTimeout.
+	}).ListenAndServe()
 }
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("/health", s.handleHealth)
 	s.mux.HandleFunc("/status", s.handleStatus)
-	s.mux.HandleFunc("/refresh-key", s.handleRefreshKey)
-	s.mux.HandleFunc("/wx-key/launch", s.handleLaunchWxKey)
-	s.mux.HandleFunc("/export", s.handleExport)
+	s.mux.HandleFunc("/refresh-key", nativeOperation(runtime.GOOS, s.handleRefreshKey))
+	s.mux.HandleFunc("/wx-key/launch", nativeOperation(runtime.GOOS, s.handleLaunchWxKey))
+	s.mux.HandleFunc("/export", nativeOperation(runtime.GOOS, s.handleExport))
 	s.mux.HandleFunc("/export/states", s.handleExportStates)
-	s.mux.HandleFunc("/full-refresh", s.handleFullRefresh)
-	s.mux.HandleFunc("/full-refresh/stream", s.handleFullRefreshStream)
+	s.mux.HandleFunc("/full-refresh", nativeOperation(runtime.GOOS, s.handleFullRefresh))
+	s.mux.HandleFunc("/full-refresh/stream", nativeOperation(runtime.GOOS, s.handleFullRefreshStream))
 	s.mux.HandleFunc("/sessions", s.handleListSessions)
 	s.mux.HandleFunc("/sessions/describe", s.handleDescribeSession)
 	s.mux.HandleFunc("/summary/run", s.handleRunSummary)
@@ -47,6 +55,16 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/config/reload", s.handleConfigReload)
 	s.mux.HandleFunc("/llm/test", s.handleTestLLM)
 	s.mux.HandleFunc("/analysis/sessions", s.handleAnalyzeSessions)
+}
+
+func nativeOperation(platform string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if platform != "windows" {
+			http.Error(w, "此平台暂不支持原生微信数据接入，请配置已导出的聊天记录目录后分析", http.StatusNotImplemented)
+			return
+		}
+		next(w, r)
+	}
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -201,7 +219,6 @@ func (s *Server) handleFullRefreshStream(w http.ResponseWriter, r *http.Request)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -331,7 +348,6 @@ func (s *Server) handleRunSummaryStream(w http.ResponseWriter, r *http.Request) 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -356,6 +372,7 @@ func (s *Server) handleRunSummaryStream(w http.ResponseWriter, r *http.Request) 
 
 	// 使用流式分析
 	result, err := s.pipeline.AnalyzeChatStream(
+		r.Context(),
 		req.StartDate, req.EndDate, req.Sessions, maxTokens, "", req.ChunkPrompt, req.FinalPrompt,
 		func(event pipeline.StreamEvent) {
 			sendEvent(event.Type, map[string]any{
@@ -479,6 +496,10 @@ func (s *Server) handleExportFiltered(w http.ResponseWriter, r *http.Request) {
 
 	result, err := s.pipeline.ExportFiltered(req.Selected, req.Files, req.StartDate, req.EndDate, req.OutputDir, req.SingleFile)
 	if err != nil {
+		if errors.Is(err, pipeline.ErrFilteredExportNotImplemented) {
+			http.Error(w, err.Error(), http.StatusNotImplemented)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

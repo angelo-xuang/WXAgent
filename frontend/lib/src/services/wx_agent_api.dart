@@ -19,8 +19,8 @@ class StreamEvent {
     final data = Map<String, dynamic>.from(json);
     final type = data.remove('type') as String? ?? '';
     final content = data.remove('content')?.toString() ?? '';
-    final step = data.remove('step') as int?;
-    final total = data.remove('total') as int?;
+    final step = (data.remove('step') as num?)?.toInt();
+    final total = (data.remove('total') as num?)?.toInt();
     return StreamEvent(
       type: type,
       content: content,
@@ -38,11 +38,21 @@ class StreamEvent {
 }
 
 class WxAgentApiClient {
-  WxAgentApiClient({required this.baseUrl, http.Client? httpClient})
-    : _client = httpClient ?? http.Client();
+  WxAgentApiClient({
+    required this.baseUrl,
+    http.Client? httpClient,
+    this.requestTimeout = const Duration(minutes: 5),
+    this.connectTimeout = const Duration(seconds: 15),
+    this.streamIdleTimeout = const Duration(minutes: 5),
+  }) : _client = httpClient ?? http.Client();
 
   final String baseUrl;
   final http.Client _client;
+  final Duration requestTimeout;
+  final Duration connectTimeout;
+  final Duration streamIdleTimeout;
+  final Set<Completer<void>> _pendingRequests = {};
+  bool _disposed = false;
 
   Future<KeyInfo> refreshKey({
     bool autoLaunch = false,
@@ -114,7 +124,7 @@ class WxAgentApiClient {
     int waitSeconds = 90,
     int pollInterval = 3,
     List<String>? exportArgs,
-  }) async* {
+  }) {
     final body = <String, dynamic>{
       'auto_launch_key': autoLaunchKey,
       'wait_seconds': waitSeconds,
@@ -122,48 +132,7 @@ class WxAgentApiClient {
       'export_args': exportArgs,
     };
 
-    final uri = _uri('/full-refresh/stream');
-    final request = http.Request('POST', uri);
-    request.headers['Content-Type'] = 'application/json';
-    request.body = jsonEncode(body);
-
-    final response = await _client.send(request);
-    if (response.statusCode >= 400) {
-      final bodyText = await response.stream.bytesToString();
-      throw HttpException(response.statusCode, bodyText);
-    }
-
-    String buffer = '';
-    await for (final chunk in response.stream.transform(utf8.decoder)) {
-      buffer += chunk;
-      while (buffer.contains('\n\n')) {
-        final eventEnd = buffer.indexOf('\n\n');
-        final eventData = buffer.substring(0, eventEnd);
-        buffer = buffer.substring(eventEnd + 2);
-
-        String? eventType;
-        String? data;
-        for (final line in eventData.split('\n')) {
-          if (line.startsWith('event: ')) {
-            eventType = line.substring(7);
-          } else if (line.startsWith('data: ')) {
-            data = line.substring(6);
-          }
-        }
-
-        if (data != null) {
-          try {
-            final jsonMap = jsonDecode(data) as Map<String, dynamic>;
-            if (eventType != null) {
-              jsonMap['type'] = eventType;
-            }
-            yield StreamEvent.fromJson(jsonMap);
-          } catch (_) {
-            // ignore bad chunks
-          }
-        }
-      }
-    }
+    return _streamEvents('/full-refresh/stream', body);
   }
 
   Future<AnalysisResult> analyzeSessions({
@@ -240,7 +209,7 @@ class WxAgentApiClient {
     int? maxTokens,
     String? chunkPrompt,
     String? finalPrompt,
-  }) async* {
+  }) {
     final sanitizedSessions = sessions
         ?.map((s) => s.trim())
         .where((s) => s.isNotEmpty)
@@ -263,56 +232,7 @@ class WxAgentApiClient {
       body['final_prompt'] = finalPrompt.trim();
     }
 
-    final uri = _uri('/summary/run-stream');
-    final request = http.Request('POST', uri);
-    request.headers['Content-Type'] = 'application/json';
-    request.body = jsonEncode(body);
-
-    final response = await _client.send(request);
-    if (response.statusCode >= 400) {
-      final bodyText = await response.stream.bytesToString();
-      throw HttpException(response.statusCode, bodyText);
-    }
-
-    // 解析 SSE 流
-    String buffer = '';
-    String? currentEventType;
-
-    await for (final chunk in response.stream.transform(utf8.decoder)) {
-      buffer += chunk;
-
-      // 处理完整的事件
-      while (buffer.contains('\n\n')) {
-        final eventEnd = buffer.indexOf('\n\n');
-        final eventData = buffer.substring(0, eventEnd);
-        buffer = buffer.substring(eventEnd + 2);
-
-        // 解析事件
-        String? eventType;
-        String? data;
-
-        for (final line in eventData.split('\n')) {
-          if (line.startsWith('event: ')) {
-            eventType = line.substring(7);
-          } else if (line.startsWith('data: ')) {
-            data = line.substring(6);
-          }
-        }
-
-        if (data != null) {
-          try {
-            final json = jsonDecode(data) as Map<String, dynamic>;
-            // 添加事件类型到 JSON
-            if (eventType != null) {
-              json['type'] = eventType;
-            }
-            yield StreamEvent.fromJson(json);
-          } catch (e) {
-            // 忽略解析错误
-          }
-        }
-      }
-    }
+    return _streamEvents('/summary/run-stream', body);
   }
 
   Future<List<SummaryHistoryEntry>> listSummaryHistory({int? limit}) async {
@@ -427,35 +347,175 @@ class WxAgentApiClient {
   Future<Map<String, dynamic>> get(
     String path, {
     Map<String, dynamic>? query,
-  }) async {
-    final response = await _client.get(_uri(path, query));
-    return _decode(response);
-  }
+  }) => _request('GET', path, query: query);
 
   Future<Map<String, dynamic>> post(
     String path, {
     Map<String, dynamic>? query,
     Object? body,
-  }) async {
-    final response = await _client.post(
-      _uri(path, query),
-      headers: const {'Content-Type': 'application/json'},
-      body: body == null ? null : jsonEncode(body),
-    );
-    return _decode(response);
-  }
+  }) => _request('POST', path, query: query, body: body);
 
   Future<Map<String, dynamic>> put(
     String path, {
     Map<String, dynamic>? query,
     Object? body,
+  }) => _request('PUT', path, query: query, body: body);
+
+  Future<Map<String, dynamic>> _request(
+    String method,
+    String path, {
+    Map<String, dynamic>? query,
+    Object? body,
   }) async {
-    final response = await _client.put(
+    if (_disposed) throw StateError('API client has been disposed');
+    final abort = Completer<void>();
+    _pendingRequests.add(abort);
+    final request = http.AbortableRequest(
+      method,
       _uri(path, query),
-      headers: const {'Content-Type': 'application/json'},
-      body: body == null ? null : jsonEncode(body),
+      abortTrigger: abort.future,
     );
-    return _decode(response);
+    if (body != null) {
+      request.headers['Content-Type'] = 'application/json';
+      request.body = jsonEncode(body);
+    }
+    try {
+      final response = await _client
+          .send(request)
+          .then(http.Response.fromStream)
+          .timeout(requestTimeout);
+      return _decode(response);
+    } finally {
+      _pendingRequests.remove(abort);
+      if (!abort.isCompleted) abort.complete();
+    }
+  }
+
+  Stream<StreamEvent> _streamEvents(String path, Object body) {
+    final abort = Completer<void>();
+    StreamSubscription<StreamEvent>? subscription;
+    late StreamController<StreamEvent> controller;
+    var cancelled = false;
+    var receivedCompletion = false;
+
+    Future<void> start() async {
+      try {
+        if (_disposed) throw StateError('API client has been disposed');
+        _pendingRequests.add(abort);
+        final request = http.AbortableRequest(
+          'POST',
+          _uri(path),
+          abortTrigger: abort.future,
+        );
+        request.headers.addAll({
+          'Content-Type': 'application/json',
+          'Accept': 'text/event-stream',
+        });
+        request.body = jsonEncode(body);
+        final response = await _client.send(request).timeout(connectTimeout);
+        if (cancelled) return;
+        if (response.statusCode >= 400) {
+          final text = await response.stream.bytesToString().timeout(
+            requestTimeout,
+          );
+          throw HttpException(response.statusCode, text);
+        }
+        subscription = _parseEvents(response.stream.timeout(streamIdleTimeout))
+            .listen(
+              (event) {
+                // The backend emits done before saving and sending its result.
+                // Only result/error proves that this operation reached its end.
+                if (const ['result', 'error'].contains(event.type)) {
+                  receivedCompletion = true;
+                }
+                controller.add(event);
+              },
+              onError: (Object error, StackTrace stack) {
+                if (!cancelled) controller.addError(error, stack);
+                unawaited(controller.close());
+                _pendingRequests.remove(abort);
+                if (!abort.isCompleted) abort.complete();
+              },
+              onDone: () {
+                if (!cancelled && !receivedCompletion) {
+                  controller.addError(
+                    const FormatException('服务连接提前结束，未收到完成结果，请重试。'),
+                  );
+                }
+                _pendingRequests.remove(abort);
+                if (!abort.isCompleted) abort.complete();
+                unawaited(controller.close());
+              },
+              cancelOnError: true,
+            );
+      } catch (error, stack) {
+        if (!cancelled) controller.addError(error, stack);
+        _pendingRequests.remove(abort);
+        if (!abort.isCompleted) abort.complete();
+        unawaited(controller.close());
+      }
+    }
+
+    controller = StreamController<StreamEvent>(
+      onListen: () => unawaited(start()),
+      onPause: () => subscription?.pause(),
+      onResume: () => subscription?.resume(),
+      onCancel: () async {
+        cancelled = true;
+        _pendingRequests.remove(abort);
+        if (!abort.isCompleted) abort.complete();
+        await subscription?.cancel();
+      },
+    );
+    return controller.stream;
+  }
+
+  /// LineSplitter handles LF/CRLF and network chunks split within a line or UTF-8.
+  /// Malformed events surface as errors so an incomplete operation cannot look successful.
+  Stream<StreamEvent> _parseEvents(Stream<List<int>> bytes) {
+    String? type;
+    final data = <String>[];
+
+    void emit(EventSink<StreamEvent> sink) {
+      if (data.isEmpty) return;
+      try {
+        final decoded = jsonDecode(data.join('\n'));
+        if (decoded is! Map<String, dynamic>) {
+          throw const FormatException('SSE event data must be a JSON object');
+        }
+        if (type != null && type!.isNotEmpty) decoded['type'] = type;
+        sink.add(StreamEvent.fromJson(decoded));
+      } catch (error, stack) {
+        sink.addError(error, stack);
+      }
+    }
+
+    return bytes
+        .transform(utf8.decoder)
+        .transform(const LineSplitter())
+        .transform(
+          StreamTransformer<String, StreamEvent>.fromHandlers(
+            handleData: (line, sink) {
+              if (line.isEmpty) {
+                emit(sink);
+                data.clear();
+                type = null;
+                return;
+              }
+              if (line.startsWith(':')) return;
+              final separator = line.indexOf(':');
+              final field = separator < 0 ? line : line.substring(0, separator);
+              var value = separator < 0 ? '' : line.substring(separator + 1);
+              if (value.startsWith(' ')) value = value.substring(1);
+              if (field == 'event') type = value;
+              if (field == 'data') data.add(value);
+            },
+            handleDone: (sink) {
+              emit(sink);
+              sink.close();
+            },
+          ),
+        );
   }
 
   Map<String, dynamic> _decode(http.Response response) {
@@ -473,6 +533,12 @@ class WxAgentApiClient {
   }
 
   void dispose() {
+    if (_disposed) return;
+    _disposed = true;
+    for (final abort in _pendingRequests.toList()) {
+      if (!abort.isCompleted) abort.complete();
+    }
+    _pendingRequests.clear();
     _client.close();
   }
 }

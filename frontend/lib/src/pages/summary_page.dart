@@ -76,6 +76,9 @@ class _SummaryPageState extends State<SummaryPage>
   bool _userScrolling = false;
   StreamSubscription<StreamEvent>? _summarySub;
   bool _cancelled = false;
+  Completer<void>? _summaryCompletion;
+  int _summaryRunId = 0;
+  int _historyRequestId = 0;
 
   List<SummaryHistoryEntry> _history = const [];
   SummaryHistoryEntry? _selectedHistory;
@@ -93,7 +96,10 @@ class _SummaryPageState extends State<SummaryPage>
 
   @override
   void dispose() {
-    _summarySub?.cancel();
+    _summaryRunId++;
+    _cancelled = true;
+    _finishSummary();
+    unawaited(_summarySub?.cancel());
     _chunkPromptCtrl.dispose();
     _finalPromptCtrl.dispose();
     _streamScrollCtrl.dispose();
@@ -107,9 +113,9 @@ class _SummaryPageState extends State<SummaryPage>
       firstDate: DateTime(2015),
       lastDate: DateTime.now().add(const Duration(days: 1)),
     );
-    if (picked == null) return;
+    if (!mounted || picked == null) return;
     final text = DateFormat('yyyy-MM-dd').format(picked);
-    setState(() {
+    _safeSetState(() {
       if (isStart) {
         _startDate = text;
       } else {
@@ -119,7 +125,7 @@ class _SummaryPageState extends State<SummaryPage>
   }
 
   void _clearDate(bool isStart) {
-    setState(() {
+    _safeSetState(() {
       if (isStart) {
         _startDate = null;
       } else {
@@ -137,19 +143,21 @@ class _SummaryPageState extends State<SummaryPage>
   }
 
   Future<void> _loadSessions() async {
-    setState(() => _loadingSessions = true);
+    _safeSetState(() => _loadingSessions = true);
     try {
       final sessions = await widget.controller.api.listSessions();
-      setState(() => _sessions = sessions);
+      _safeSetState(() => _sessions = sessions);
+    } catch (error) {
+      _safeSetState(() => _error = '无法加载会话：$error');
     } finally {
       if (mounted) {
-        setState(() => _loadingSessions = false);
+        _safeSetState(() => _loadingSessions = false);
       }
     }
   }
 
   Future<void> _loadHistory() async {
-    setState(() => _historyLoading = true);
+    _safeSetState(() => _historyLoading = true);
     try {
       final entries = await widget.controller.api.listSummaryHistory();
       // 去重后按修改时间倒序
@@ -163,7 +171,7 @@ class _SummaryPageState extends State<SummaryPage>
         final right = a.modified ?? '';
         return left.compareTo(right);
       });
-      setState(() {
+      _safeSetState(() {
         _history = list;
         if (_selectedHistory == null && list.isNotEmpty) {
           _selectedHistory = list.first;
@@ -172,50 +180,61 @@ class _SummaryPageState extends State<SummaryPage>
           _selectedHistory = list.isNotEmpty ? list.first : null;
         }
       });
-      if (_selectedHistory != null) {
+      if (mounted && _selectedHistory != null) {
         await _loadHistoryContent(_selectedHistory!);
       }
+    } catch (error) {
+      _safeSetState(() => _error = '无法加载历史总结：$error');
     } finally {
       if (mounted) {
-        setState(() => _historyLoading = false);
+        _safeSetState(() => _historyLoading = false);
       }
     }
   }
 
   Future<void> _loadHistoryContent(SummaryHistoryEntry entry) async {
-    setState(() => _historyLoading = true);
+    final requestId = ++_historyRequestId;
+    _safeSetState(() => _historyLoading = true);
     try {
       final content = await widget.controller.api.readSummaryHistory(
         entry.path,
       );
-      setState(() {
+      if (!mounted || requestId != _historyRequestId) return;
+      _safeSetState(() {
         _resultContent = content;
         _summaryPath = entry.path;
         _selectedHistory = entry;
       });
+    } catch (error) {
+      if (requestId == _historyRequestId) {
+        _safeSetState(() => _error = '无法读取历史总结：$error');
+      }
     } finally {
       if (mounted) {
-        setState(() => _historyLoading = false);
+        _safeSetState(() => _historyLoading = false);
       }
     }
   }
 
   Future<void> _runSummary() async {
+    if (_running) return;
+    final runId = ++_summaryRunId;
     await _summarySub?.cancel();
     _summarySub = null;
+    if (!mounted) return;
 
     if (_useCustomPrompt) {
       final chunk = _chunkPromptCtrl.text;
       final finalPrompt = _finalPromptCtrl.text;
       if (!chunk.contains('{{content}}')) {
-        setState(() {
+        _safeSetState(() {
           _error = '分段提示词必须包含 {{content}} 占位符（用于放入分段内容）。';
         });
         return;
       }
       if (!finalPrompt.contains('{{intro}}') ||
           !finalPrompt.contains('{{summaries}}')) {
-        setState(() {
+        _safeSetState(() {
           _error = '最终提示词必须同时包含 {{intro}} 与 {{summaries}} 占位符。';
         });
         return;
@@ -223,10 +242,15 @@ class _SummaryPageState extends State<SummaryPage>
     }
 
     // 如果 AI 接口未配置，直接给出更友好的提示，避免把底层 401/鉴权错误抛到 UI。
+    _safeSetState(() => _running = true);
     final configured = await _ensureAiConfigured();
-    if (!configured) return;
+    if (!mounted || runId != _summaryRunId) return;
+    if (!configured) {
+      _safeSetState(() => _running = false);
+      return;
+    }
 
-    setState(() {
+    _safeSetState(() {
       _running = true;
       _cancelled = false;
       _error = null;
@@ -244,6 +268,8 @@ class _SummaryPageState extends State<SummaryPage>
     });
 
     String finalContent = '';
+    final completion = Completer<void>();
+    _summaryCompletion = completion;
 
     try {
       final stream = widget.controller.api.runSummaryStream(
@@ -256,10 +282,10 @@ class _SummaryPageState extends State<SummaryPage>
 
       _summarySub = stream.listen(
         (event) {
-          if (!mounted) return;
+          if (!mounted || runId != _summaryRunId) return;
           switch (event.type) {
             case 'log':
-              setState(() {
+              _safeSetState(() {
                 if (event.content.isNotEmpty) {
                   _streamLog += '${event.content}\n';
                 }
@@ -269,14 +295,14 @@ class _SummaryPageState extends State<SummaryPage>
               _scrollToBottom();
               break;
             case 'ai_chunk':
-              setState(() {
+              _safeSetState(() {
                 _streamAiOutput += event.content;
                 _currentStep = event.step ?? _currentStep;
               });
               _scrollToBottom();
               break;
             case 'progress':
-              setState(() {
+              _safeSetState(() {
                 _currentStep = event.step ?? _currentStep;
                 _totalSteps = event.total ?? _totalSteps;
               });
@@ -285,19 +311,21 @@ class _SummaryPageState extends State<SummaryPage>
               final raw = event.content.isNotEmpty
                   ? event.content
                   : event.payload?['message']?.toString();
-              setState(() {
+              _safeSetState(() {
                 _error = _formatError(raw);
               });
               _cancelled = true;
+              _finishSummary();
               unawaited(_summarySub?.cancel());
               break;
             case 'result':
-              setState(() {
+              _safeSetState(() {
                 finalContent = event.content.isNotEmpty
                     ? event.content
                     : _streamAiOutput;
                 final payload = event.payload ?? const {};
-                _summaryPath = payload['output_path'] as String? ?? _summaryPath;
+                _summaryPath =
+                    payload['output_path'] as String? ?? _summaryPath;
                 _totalMessages = _asInt(payload['total_messages']);
                 _totalSessions = _asInt(payload['total_sessions']);
                 _chunkCount = _asInt(payload['chunk_count']);
@@ -308,19 +336,19 @@ class _SummaryPageState extends State<SummaryPage>
               break;
           }
         },
-        onError: (err, _) {
-          if (!mounted) return;
-          setState(() {
-            _error = _formatError(err.toString());
-          });
+        onError: (Object err, StackTrace stack) {
+          if (!completion.isCompleted) completion.completeError(err, stack);
+        },
+        onDone: () {
+          if (!completion.isCompleted) completion.complete();
         },
         cancelOnError: true,
       );
 
-      await _summarySub!.asFuture<void>();
+      await completion.future;
 
-      if (!_cancelled && mounted && _error == null) {
-        setState(() {
+      if (!_cancelled && mounted && runId == _summaryRunId && _error == null) {
+        _safeSetState(() {
           _resultContent = finalContent.isNotEmpty
               ? finalContent
               : _streamAiOutput;
@@ -335,31 +363,38 @@ class _SummaryPageState extends State<SummaryPage>
         }
       }
     } catch (err) {
-      if (mounted) {
-        setState(() => _error = _formatError(err.toString()));
+      if (mounted && runId == _summaryRunId) {
+        _safeSetState(() => _error = _formatError(err.toString()));
       }
     } finally {
-      _summarySub = null;
-      if (mounted) {
-        setState(() => _running = false);
+      if (runId == _summaryRunId) {
+        _summarySub = null;
+        _summaryCompletion = null;
+        _safeSetState(() => _running = false);
       }
     }
   }
 
+  void _finishSummary() {
+    final completion = _summaryCompletion;
+    if (completion != null && !completion.isCompleted) completion.complete();
+  }
+
   Future<void> _stopSummary() async {
+    _summaryRunId++;
     _cancelled = true;
+    _finishSummary();
     await _summarySub?.cancel();
     _summarySub = null;
     if (mounted) {
-      setState(() => _running = false);
+      _safeSetState(() => _running = false);
     }
   }
 
   Future<bool> _ensureAiConfigured() async {
     try {
       final resp = await widget.controller.api.fetchConfig();
-      final data =
-          (resp['data'] as Map?)?.cast<String, dynamic>() ?? const {};
+      final data = (resp['data'] as Map?)?.cast<String, dynamic>() ?? const {};
       final llm = (data['llm'] as Map?)?.cast<String, dynamic>() ?? const {};
       final apiKey = (llm['api_key'] as String?)?.trim() ?? '';
       final baseUrl = (llm['base_url'] as String?)?.trim() ?? '';
@@ -367,7 +402,7 @@ class _SummaryPageState extends State<SummaryPage>
       // 本地 OpenAI-compat 服务（如 localhost）可能无需 key；其它情况未配置 key 直接提示。
       if (apiKey.isEmpty && !_isLocalBaseUrl(baseUrl)) {
         if (!mounted) return false;
-        setState(() => _error = _friendlyApiConfigError);
+        _safeSetState(() => _error = _friendlyApiConfigError);
         return false;
       }
     } catch (_) {
@@ -417,7 +452,7 @@ class _SummaryPageState extends State<SummaryPage>
   void _scrollToBottom() {
     if (_userScrolling) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_streamScrollCtrl.hasClients) {
+      if (mounted && _streamScrollCtrl.hasClients) {
         _streamScrollCtrl.animateTo(
           _streamScrollCtrl.position.maxScrollExtent,
           duration: const Duration(milliseconds: 120),
@@ -495,7 +530,7 @@ class _SummaryPageState extends State<SummaryPage>
                           const SizedBox(width: 12),
                           ElevatedButton(
                             onPressed: () {
-                              setState(() {
+                              _safeSetState(() {
                                 _selectedSessions
                                   ..clear()
                                   ..addAll(temp);
@@ -550,6 +585,10 @@ class _SummaryPageState extends State<SummaryPage>
   @override
   bool get wantKeepAlive => true;
 
+  void _safeSetState(VoidCallback update) {
+    if (mounted) setState(update);
+  }
+
   @override
   Widget build(BuildContext context) {
     super.build(context);
@@ -565,33 +604,44 @@ class _SummaryPageState extends State<SummaryPage>
 
     return PageContainer(
       title: '聊天记录 AI 总结',
-      subtitle: '对导出的聊天记录生成 Markdown 报告，可使用默认提示词或自定义分段/最终提示词。在第一次使用本功能前，请先在设置页面配置好 AI 接口。',
+      subtitle:
+          '对导出的聊天记录生成 Markdown 报告，可使用默认提示词或自定义分段/最终提示词。在第一次使用本功能前，请先在设置页面配置好 AI 接口。',
       children: [
         SectionCard(
           title: '筛选与提示词',
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Row(
-                children: [
-                  Expanded(
-                    child: _DateField(
-                      label: '开始日期',
-                      value: _startDate,
-                      onPick: () => _pickDate(isStart: true),
-                      onClear: () => _clearDate(true),
-                    ),
-                  ),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: _DateField(
-                      label: '结束日期',
-                      value: _endDate,
-                      onPick: () => _pickDate(isStart: false),
-                      onClear: () => _clearDate(false),
-                    ),
-                  ),
-                ],
+              LayoutBuilder(
+                builder: (context, constraints) {
+                  final width = constraints.maxWidth < 560
+                      ? constraints.maxWidth
+                      : (constraints.maxWidth - 16) / 2;
+                  return Wrap(
+                    spacing: 16,
+                    runSpacing: 16,
+                    children: [
+                      SizedBox(
+                        width: width,
+                        child: _DateField(
+                          label: '开始日期',
+                          value: _startDate,
+                          onPick: () => _pickDate(isStart: true),
+                          onClear: () => _clearDate(true),
+                        ),
+                      ),
+                      SizedBox(
+                        width: width,
+                        child: _DateField(
+                          label: '结束日期',
+                          value: _endDate,
+                          onPick: () => _pickDate(isStart: false),
+                          onClear: () => _clearDate(false),
+                        ),
+                      ),
+                    ],
+                  );
+                },
               ),
               const SizedBox(height: 16),
               Wrap(
@@ -619,7 +669,7 @@ class _SummaryPageState extends State<SummaryPage>
                   if (_selectedSessions.isNotEmpty)
                     TextButton(
                       onPressed: () =>
-                          setState(() => _selectedSessions.clear()),
+                          _safeSetState(() => _selectedSessions.clear()),
                       child: const Text('清空选择'),
                     ),
                 ],
@@ -631,19 +681,16 @@ class _SummaryPageState extends State<SummaryPage>
               ),
               const SizedBox(height: 16),
               const Text('提示词', style: TextStyle(fontWeight: FontWeight.w600)),
-              RadioListTile<bool>(
-                value: false,
+              RadioGroup<bool>(
                 groupValue: _useCustomPrompt,
                 onChanged: (value) =>
-                    setState(() => _useCustomPrompt = value ?? false),
-                title: const Text('使用默认提示词'),
-              ),
-              RadioListTile<bool>(
-                value: true,
-                groupValue: _useCustomPrompt,
-                onChanged: (value) =>
-                    setState(() => _useCustomPrompt = value ?? false),
-                title: const Text('自定义提示词'),
+                    _safeSetState(() => _useCustomPrompt = value ?? false),
+                child: const Column(
+                  children: [
+                    RadioListTile<bool>(value: false, title: Text('使用默认提示词')),
+                    RadioListTile<bool>(value: true, title: Text('自定义提示词')),
+                  ],
+                ),
               ),
               AnimatedCrossFade(
                 firstChild: Column(
@@ -693,7 +740,9 @@ class _SummaryPageState extends State<SummaryPage>
                 Text(_error!, style: const TextStyle(color: Colors.redAccent)),
               ],
               const SizedBox(height: 12),
-              Row(
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
                 children: [
                   ElevatedButton.icon(
                     onPressed: _running ? null : _runSummary,
@@ -749,13 +798,18 @@ class _SummaryPageState extends State<SummaryPage>
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               DropdownButtonFormField<SummaryHistoryEntry>(
-                value: validSelectedHistory,
+                initialValue: validSelectedHistory,
+                key: ValueKey(validSelectedHistory?.path),
+                isExpanded: true,
                 decoration: const InputDecoration(labelText: '历史总结'),
                 items: _history
                     .map(
                       (entry) => DropdownMenuItem(
                         value: entry,
-                        child: Text(entry.name),
+                        child: Text(
+                          entry.name,
+                          overflow: TextOverflow.ellipsis,
+                        ),
                       ),
                     )
                     .toList(),
@@ -777,7 +831,10 @@ class _SummaryPageState extends State<SummaryPage>
                     borderRadius: BorderRadius.circular(8),
                     border: Border.all(color: Colors.blue.shade200),
                   ),
-                  child: Row(
+                  child: Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    crossAxisAlignment: WrapCrossAlignment.center,
                     children: [
                       const Icon(Icons.analytics, size: 20, color: Colors.blue),
                       const SizedBox(width: 8),
@@ -889,7 +946,7 @@ class _SummaryPageState extends State<SummaryPage>
                                 constraints: const BoxConstraints(),
                                 tooltip: '清除日志',
                                 onPressed: () {
-                                  setState(() {
+                                  _safeSetState(() {
                                     _streamLog = '';
                                     _streamAiOutput = '';
                                   });
@@ -908,11 +965,11 @@ class _SummaryPageState extends State<SummaryPage>
                                 if (notification is UserScrollNotification &&
                                     notification.direction !=
                                         ScrollDirection.idle) {
-                                  setState(() => _userScrolling = true);
+                                  _safeSetState(() => _userScrolling = true);
                                 } else if (notification
                                     is ScrollEndNotification) {
                                   if (_isNearBottom()) {
-                                    setState(() => _userScrolling = false);
+                                    _safeSetState(() => _userScrolling = false);
                                   }
                                 }
                                 return false;
@@ -967,7 +1024,7 @@ class _SummaryPageState extends State<SummaryPage>
                                 child: InkWell(
                                   borderRadius: BorderRadius.circular(20),
                                   onTap: () {
-                                    setState(() => _userScrolling = false);
+                                    _safeSetState(() => _userScrolling = false);
                                     _scrollToBottom();
                                   },
                                   child: const Padding(

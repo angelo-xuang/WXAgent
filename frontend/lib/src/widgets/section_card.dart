@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../theme.dart';
+
 class SectionCard extends StatelessWidget {
   const SectionCard({
     super.key,
@@ -16,49 +18,71 @@ class SectionCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final compact = constraints.maxWidth < 600;
+        final heading = Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
+            Text(
+              title,
+              style: Theme.of(
+                context,
+              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
+            ),
+            if (subtitle != null) ...[
+              const SizedBox(height: 6),
+              Text(
+                subtitle!,
+                style: const TextStyle(
+                  color: WxAgentColors.textSecondary,
+                  fontSize: 13,
+                  height: 1.7,
+                ),
+              ),
+            ],
+          ],
+        );
+        final actionBar = Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: actions ?? [],
+        );
+        return Card(
+          child: Padding(
+            padding: EdgeInsets.all(compact ? 20 : 26),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Expanded(
-                  child: Column(
+                if (compact)
+                  Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                        title,
-                        style: Theme.of(context).textTheme.titleMedium
-                            ?.copyWith(fontWeight: FontWeight.w700),
-                      ),
-                      if (subtitle != null) ...[
-                        const SizedBox(height: 6),
-                        Text(
-                          subtitle!,
-                          style: Theme.of(context).textTheme.bodySmall
-                              ?.copyWith(color: Colors.black54),
-                        ),
+                      heading,
+                      if (actions?.isNotEmpty ?? false) ...[
+                        const SizedBox(height: 12),
+                        actionBar,
+                      ],
+                    ],
+                  )
+                else
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(child: heading),
+                      if (actions?.isNotEmpty ?? false) ...[
+                        const SizedBox(width: 20),
+                        Flexible(child: actionBar),
                       ],
                     ],
                   ),
-                ),
-                if (actions != null && actions!.isNotEmpty)
-                  Wrap(
-                    spacing: 12,
-                    runSpacing: 8,
-                    alignment: WrapAlignment.end,
-                    children: actions!,
-                  ),
+                const SizedBox(height: 22),
+                child,
               ],
             ),
-            const SizedBox(height: 20),
-            child,
-          ],
-        ),
-      ),
+          ),
+        );
+      },
     );
   }
 }

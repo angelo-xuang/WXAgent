@@ -5,13 +5,18 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/billyoftea/wxagent/go_backend/internal/analyzer"
+	"github.com/billyoftea/wxagent/go_backend/internal/atomicfile"
 	"github.com/billyoftea/wxagent/go_backend/internal/config"
 	"github.com/billyoftea/wxagent/go_backend/internal/dataset"
 	"github.com/billyoftea/wxagent/go_backend/internal/echotrace"
@@ -36,11 +41,7 @@ func New(cfg *config.PipelineConfig) (*Pipeline, error) {
 	fmt.Printf("[DEBUG] State file path from config: %s\n", cfg.StateFile)
 	s := state.New(cfg.StateFile)
 	if err := s.Load(); err != nil {
-		// Log warning but continue? Or fail?
-		// For now, just continue with empty state if load fails (e.g. permission),
-		// but New() usually shouldn't fail on logic errors.
-		// Let's assume it's fine.
-		fmt.Printf("Warning: failed to load state: %v\n", err)
+		return nil, fmt.Errorf("load state without overwriting existing data: %w", err)
 	}
 
 	return &Pipeline{
@@ -148,11 +149,9 @@ func (p *Pipeline) RunSummary(startDate, endDate string, incremental bool, quest
 		fmt.Printf("🤖 Summarizing %s (%d messages)...\n", sessionName, len(messages))
 		summary, err := summ.SummarizeSession(ctx, sessionName, messages)
 		if err != nil {
-			fmt.Printf("❌ Failed to summarize %s: %v\n", sessionName, err)
-			summaries[sessionName] = fmt.Sprintf("Error: %v", err)
-		} else {
-			summaries[sessionName] = summary
+			return nil, fmt.Errorf("summarize %s: %w", sessionName, err)
 		}
+		summaries[sessionName] = summary
 	}
 
 	// 4. Save results
@@ -163,8 +162,12 @@ func (p *Pipeline) RunSummary(startDate, endDate string, incremental bool, quest
 
 	// 5. Save state
 	if incremental {
-		if err := p.State.Save(); err != nil {
-			fmt.Printf("⚠️ Failed to save state: %v\n", err)
+		updates := make(map[string]state.SessionState, len(result.Stats))
+		for _, stat := range result.Stats {
+			updates[stat.SessionID] = state.SessionState{LastTimestamp: stat.LastTimestamp, LastCount: stat.Messages}
+		}
+		if err := p.State.CommitSummaries(updates); err != nil {
+			return nil, fmt.Errorf("save summary progress: %w", err)
 		}
 	}
 
@@ -180,13 +183,19 @@ func saveSummaryMarkdown(path string, summaries map[string]string) error {
 	sb.WriteString("# Chat Summaries\n\n")
 	sb.WriteString(fmt.Sprintf("Generated at: %s\n\n", time.Now().Format(time.DateTime)))
 
-	for name, summary := range summaries {
+	names := make([]string, 0, len(summaries))
+	for name := range summaries {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		summary := summaries[name]
 		sb.WriteString(fmt.Sprintf("## %s\n\n", name))
 		sb.WriteString(summary)
 		sb.WriteString("\n\n---\n\n")
 	}
 
-	return os.WriteFile(path, []byte(sb.String()), 0644)
+	return atomicfile.Write(path, []byte(sb.String()), 0600)
 }
 
 func (p *Pipeline) GetStatus() map[string]any {
@@ -194,6 +203,12 @@ func (p *Pipeline) GetStatus() map[string]any {
 		"config_path": p.Config.ConfigPath,
 		"export_dir":  p.Config.ExportDir,
 		"state_file":  p.Config.StateFile,
+		"platform":    runtime.GOOS,
+		"capabilities": map[string]bool{
+			"native_wechat":   runtime.GOOS == "windows",
+			"analyze_exports": true,
+			"filtered_export": false,
+		},
 	}
 }
 
@@ -530,11 +545,10 @@ func (p *Pipeline) AnalyzeChat(startDate, endDate string, sessionNames []string,
 }
 
 // AnalyzeChatStream 流式分析聊天记录，通过 callback 发送事件
-func (p *Pipeline) AnalyzeChatStream(startDate, endDate string, sessionNames []string, maxTokens int, outputFile string, chunkPrompt, finalPrompt string, callback analyzer.StreamCallback) (*analyzer.AnalyzeResult, error) {
+func (p *Pipeline) AnalyzeChatStream(ctx context.Context, startDate, endDate string, sessionNames []string, maxTokens int, outputFile string, chunkPrompt, finalPrompt string, callback analyzer.StreamCallback) (*analyzer.AnalyzeResult, error) {
 	llmClient := llm.NewClient(p.Config.LLM)
 	a := analyzer.New(p.Config.ExportDir, llmClient)
 
-	ctx := context.Background()
 	result, err := a.AnalyzeStream(ctx, analyzer.AnalyzeOptions{
 		StartDate:    startDate,
 		EndDate:      endDate,
@@ -585,7 +599,7 @@ func (p *Pipeline) DescribeSession(file, startDate, endDate string) (map[string]
 	}, nil
 }
 
-func (p *Pipeline) ListSummaryHistory(limit int) ([]map[string]any, error) {
+func (p *Pipeline) summaryHistoryDirs() []string {
 	historyDir := p.Config.SummaryHistoryDir
 	dirsToScan := []string{}
 	if historyDir != "" {
@@ -597,11 +611,15 @@ func (p *Pipeline) ListSummaryHistory(limit int) ([]map[string]any, error) {
 		filepath.Join(p.Config.ExportDir, "analysis"),
 		filepath.Join(p.Config.ExportDir, "chat_history", "analysis"),
 	)
+	return dirsToScan
+}
+
+func (p *Pipeline) ListSummaryHistory(limit int) ([]map[string]any, error) {
 
 	seen := make(map[string]bool)
 	history := make([]map[string]any, 0)
 
-	for _, dir := range dirsToScan {
+	for _, dir := range p.summaryHistoryDirs() {
 		if dir == "" {
 			continue
 		}
@@ -638,36 +656,68 @@ func (p *Pipeline) ListSummaryHistory(limit int) ([]map[string]any, error) {
 			})
 			seen[fullPath] = true
 
-			if limit > 0 && len(history) >= limit {
-				return history, nil
-			}
 		}
+	}
+	// Apply the limit after sorting across all history directories.
+	sort.SliceStable(history, func(i, j int) bool {
+		left, _ := time.Parse(time.RFC3339, history[i]["modified"].(string))
+		right, _ := time.Parse(time.RFC3339, history[j]["modified"].(string))
+		return left.After(right)
+	})
+	if limit > 0 && len(history) > limit {
+		history = history[:limit]
 	}
 
 	return history, nil
 }
 
 func (p *Pipeline) ReadSummaryHistory(path string) (string, error) {
-	content, err := os.ReadFile(path)
+	absPath, err := filepath.Abs(path)
 	if err != nil {
-		return "", fmt.Errorf("read history file: %w", err)
+		return "", fmt.Errorf("resolve history file: %w", err)
 	}
-	return string(content), nil
+	ext := strings.ToLower(filepath.Ext(absPath))
+	if ext != ".md" && ext != ".txt" {
+		return "", fmt.Errorf("history files must be Markdown or text")
+	}
+	for _, dir := range p.summaryHistoryDirs() {
+		rootPath, err := filepath.Abs(dir)
+		if err != nil {
+			continue
+		}
+		rel, err := filepath.Rel(rootPath, absPath)
+		if err != nil || !filepath.IsLocal(rel) {
+			continue
+		}
+		// OpenRoot prevents symlink traversal outside the allowed directory,
+		// including a symlink changed between validation and the file open.
+		root, err := os.OpenRoot(rootPath)
+		if err != nil {
+			continue
+		}
+		file, err := root.Open(rel)
+		root.Close()
+		if err != nil {
+			return "", fmt.Errorf("open history file: %w", err)
+		}
+		defer file.Close()
+		info, err := file.Stat()
+		if err != nil || !info.Mode().IsRegular() {
+			return "", fmt.Errorf("history path is not a regular file")
+		}
+		content, err := io.ReadAll(file)
+		if err != nil {
+			return "", fmt.Errorf("read history file: %w", err)
+		}
+		return string(content), nil
+	}
+	return "", fmt.Errorf("history file is outside configured history directories")
 }
 
+var ErrFilteredExportNotImplemented = errors.New("筛选导出尚未实现，未生成或修改任何文件")
+
 func (p *Pipeline) ExportFiltered(selected, files []string, startDate, endDate, outputDir string, singleFile bool) (map[string]any, error) {
-	// This is a placeholder for filtered export functionality
-	// Implement based on your specific requirements
-	return map[string]any{
-		"status":      "success",
-		"selected":    selected,
-		"files":       files,
-		"start_date":  startDate,
-		"end_date":    endDate,
-		"output_dir":  outputDir,
-		"single_file": singleFile,
-		"message":     "Filtered export not yet fully implemented",
-	}, nil
+	return nil, ErrFilteredExportNotImplemented
 }
 
 func (p *Pipeline) GetConfig() map[string]any {
@@ -695,6 +745,23 @@ func (p *Pipeline) GetConfig() map[string]any {
 }
 
 func (p *Pipeline) UpdateConfig(values map[string]any) (map[string]any, error) {
+	// Stage changes on a separate config; failed persistence must leave the live
+	// process using its original settings.
+	stagedConfig := *p.Config
+	staged := *p
+	staged.Config = &stagedConfig
+	if err := staged.applyConfig(values); err != nil {
+		return nil, err
+	}
+	p.Config = staged.Config
+	p.State = staged.State
+	return map[string]any{
+		"status": "success", "message": "Configuration updated",
+	}, nil
+}
+
+func (p *Pipeline) applyConfig(values map[string]any) error {
+	previousStatePath := p.Config.StateFile
 	// Update configuration values
 	// This is a simplified implementation - you may want to add validation
 	if v, ok := values["wechat_data_path"].(string); ok {
@@ -728,18 +795,21 @@ func (p *Pipeline) UpdateConfig(values map[string]any) (map[string]any, error) {
 			p.Config.LLM.Temperature = v
 		}
 		if v, ok := llmData["timeout"].(float64); ok {
-			p.Config.LLM.Timeout = time.Duration(v) * time.Second
+			p.Config.LLM.Timeout = time.Duration(v * float64(time.Second))
 		}
 	}
 
-	if err := p.saveConfigToFile(values); err != nil {
-		return nil, err
+	if p.Config.StateFile != previousStatePath {
+		stagedState := state.New(p.Config.StateFile)
+		if err := stagedState.Load(); err != nil {
+			return fmt.Errorf("load updated state file: %w", err)
+		}
+		p.State = stagedState
 	}
-
-	return map[string]any{
-		"status":  "success",
-		"message": "Configuration updated",
-	}, nil
+	if err := p.saveConfigToFile(values); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (p *Pipeline) resolvePathRelativeToConfig(input string) string {
@@ -772,6 +842,9 @@ func (p *Pipeline) saveConfigToFile(values map[string]any) error {
 	if err := json.Unmarshal(raw, &data); err != nil {
 		return fmt.Errorf("parse config %s: %w", p.Config.ConfigPath, err)
 	}
+	if data == nil {
+		return fmt.Errorf("configuration must be a JSON object")
+	}
 
 	for key, value := range values {
 		if key == "llm" {
@@ -786,6 +859,9 @@ func (p *Pipeline) saveConfigToFile(values map[string]any) error {
 			}
 			for nestedKey, nestedValue := range updates {
 				existing[nestedKey] = nestedValue
+				// Legacy flat settings otherwise override updated nested settings
+				// when loading the saved configuration after a restart.
+				delete(data, "llm_"+nestedKey)
 			}
 			continue
 		}
@@ -798,7 +874,7 @@ func (p *Pipeline) saveConfigToFile(values map[string]any) error {
 	}
 	encoded = append(encoded, '\n')
 
-	if err := os.WriteFile(p.Config.ConfigPath, encoded, 0644); err != nil {
+	if err := atomicfile.Write(p.Config.ConfigPath, encoded, 0600); err != nil {
 		return fmt.Errorf("write config %s: %w", p.Config.ConfigPath, err)
 	}
 	return nil
@@ -814,7 +890,16 @@ func (p *Pipeline) ReloadConfig() (map[string]any, error) {
 		return nil, fmt.Errorf("reload config: %w", err)
 	}
 
-	*p.Config = *newConfig
+	// Build and validate the dependent state and runners before publishing the
+	// new configuration. Updating Config alone leaves them on the old paths.
+	staged, err := New(newConfig)
+	if err != nil {
+		return nil, fmt.Errorf("reload dependencies: %w", err)
+	}
+	p.Config = staged.Config
+	p.State = staged.State
+	p.WxKey = staged.WxKey
+	p.Echotrace = staged.Echotrace
 
 	return map[string]any{
 		"status":  "success",

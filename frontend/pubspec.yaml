@@ -1,5 +1,5 @@
 name: wx_agent_app
-description: "A new Flutter project."
+description: "本地微信聊天记录整理、分析与 AI 总结桌面工具。"
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
@@ -35,7 +35,7 @@ dependencies:
   cupertino_icons: ^1.0.8
 
   # Networking & state
-  http: ^1.2.2
+  http: ^1.6.0
   provider: ^6.1.2
 
   # Platform integration & utilities

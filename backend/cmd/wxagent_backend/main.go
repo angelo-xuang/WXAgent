@@ -169,7 +169,7 @@ func runSummarize(p *pipeline.Pipeline) {
 func runServer(p *pipeline.Pipeline) {
 	fs := flag.NewFlagSet("server", flag.ExitOnError)
 	port := fs.Int("port", 8000, "Port to listen on")
-	host := fs.String("host", "0.0.0.0", "Host to listen on")
+	host := fs.String("host", "127.0.0.1", "Host to listen on")
 	fs.Parse(flag.Args()[1:])
 
 	addr := fmt.Sprintf("%s:%d", *host, *port)

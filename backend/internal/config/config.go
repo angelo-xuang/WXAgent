@@ -36,6 +36,9 @@ func Load(path string) (*Config, error) {
 	if err := json.Unmarshal(raw, &data); err != nil {
 		return nil, fmt.Errorf("parse config %s: %w", resolved, err)
 	}
+	if data == nil {
+		return nil, fmt.Errorf("parse config %s: expected a JSON object", resolved)
+	}
 	return &Config{
 		Path: resolved,
 		dir:  filepath.Dir(resolved),
@@ -110,6 +113,9 @@ func redactKey(m map[string]any, key string) {
 // ResolvePath converts a config path (which may be relative or contain ~) into
 // an absolute path anchored at the config file directory.
 func (c *Config) ResolvePath(value any) string {
+	if value == nil {
+		return ""
+	}
 	text := strings.TrimSpace(fmt.Sprint(value))
 	if text == "" {
 		return ""
@@ -209,7 +215,7 @@ func LoadPipeline(path string) (*PipelineConfig, error) {
 	dir := filepath.Dir(raw.Path)
 
 	getPath := func(key string, fallback string) string {
-		if val, ok := raw.data[key]; ok {
+		if val, ok := raw.data[key]; ok && val != nil {
 			if text := strings.TrimSpace(fmt.Sprint(val)); text != "" {
 				if resolved := raw.ResolvePath(val); resolved != "" {
 					return resolved
@@ -274,13 +280,13 @@ func LoadPipeline(path string) (*PipelineConfig, error) {
 func parseCommand(base *Config, value any, fallback CommandSpec) CommandSpec {
 	result := fallback
 	if data, ok := value.(map[string]any); ok {
-		if path := strings.TrimSpace(fmt.Sprint(data["path"])); path != "" {
+		if path, ok := data["path"].(string); ok && strings.TrimSpace(path) != "" {
 			result.Path = base.ResolvePath(path)
 		}
 		if args := stringSlice(data["args"]); args != nil {
 			result.Args = args
 		}
-		if cwd := strings.TrimSpace(fmt.Sprint(data["cwd"])); cwd != "" {
+		if cwd, ok := data["cwd"].(string); ok && strings.TrimSpace(cwd) != "" {
 			result.Cwd = base.ResolvePath(cwd)
 		}
 		if envMap, ok := data["env"].(map[string]any); ok {

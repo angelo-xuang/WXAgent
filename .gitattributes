@@ -1,0 +1,22 @@
+* text=auto
+*.go text eol=lf
+*.dart text eol=lf
+*.swift text eol=lf
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.xcconfig text eol=lf
+*.pbxproj text eol=lf
+*.entitlements text eol=lf
+*.ps1 text eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.png binary
+*.ico binary
+*.dll binary
+
+# Do not normalize vendored modules or existing release assets.
+modules/** -text !eol
+release/** -text !eol
+dist/** -text !eol
+scripts/build_release.* -text !eol

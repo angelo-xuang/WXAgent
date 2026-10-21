@@ -1,154 +1,236 @@
-// WXAgent Launcher - 同时启动后端和前端
+// WXAgent Launcher starts and supervises the desktop app and its local backend.
 package main
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 )
 
-var (
-	backendPort  = flag.Int("port", 8000, "后端服务器端口")
-	showConsole  = flag.Bool("console", false, "显示后端控制台")
-	backendOnly  = flag.Bool("backend-only", false, "仅启动后端")
-	frontendOnly = flag.Bool("frontend-only", false, "仅启动前端")
-)
+type options struct {
+	port         int
+	showConsole  bool
+	backendOnly  bool
+	frontendOnly bool
+}
 
 func main() {
+	var opts options
+	flag.IntVar(&opts.port, "port", 8000, "后端服务器端口")
+	flag.BoolVar(&opts.showConsole, "console", false, "显示后端控制台")
+	flag.BoolVar(&opts.backendOnly, "backend-only", false, "仅启动后端")
+	flag.BoolVar(&opts.frontendOnly, "frontend-only", false, "仅启动前端")
 	flag.Parse()
 
-	// 获取可执行文件所在目录
 	exePath, err := os.Executable()
 	if err != nil {
 		log.Fatalf("获取执行路径失败: %v", err)
 	}
-	baseDir := filepath.Dir(exePath)
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	if err := run(ctx, filepath.Dir(exePath), opts); err != nil {
+		log.Fatalf("启动失败: %v", err)
+	}
+}
 
-	fmt.Println("========================================")
-	fmt.Println("    WXAgent 启动器")
-	fmt.Println("========================================")
-	fmt.Printf("工作目录: %s\n", baseDir)
-	fmt.Printf("后端端口: %d\n", *backendPort)
-	fmt.Println()
+func (o options) validate() error {
+	if o.port < 1 || o.port > 65535 {
+		return errors.New("端口必须在 1–65535 之间")
+	}
+	if o.backendOnly && o.frontendOnly {
+		return errors.New("--backend-only 与 --frontend-only 不能同时使用")
+	}
+	return nil
+}
 
-	var backendCmd *exec.Cmd
-	var frontendCmd *exec.Cmd
-
-	// 启动后端
-	if !*frontendOnly {
-		backendCandidates := []string{
-			filepath.Join(baseDir, "backend", "wxagent_backend.exe"),
-			filepath.Join(baseDir, "backend", "wx_agent_backend.exe"),
-			filepath.Join(baseDir, "wxagent_backend.exe"),
-			filepath.Join(baseDir, "wx_agent_backend.exe"),
-			filepath.Join(baseDir, "wx_agent.exe"),
+func run(ctx context.Context, baseDir string, opts options) error {
+	if err := opts.validate(); err != nil {
+		return err
+	}
+	fmt.Printf("WXAgent · 工作目录: %s\n", baseDir)
+	backendURL := fmt.Sprintf("http://127.0.0.1:%d", opts.port)
+	var backend *childProcess
+	if !opts.frontendOnly {
+		path, err := findExecutable(backendCandidates(baseDir, runtime.GOOS))
+		if err != nil {
+			return fmt.Errorf("未找到后端程序: %w", err)
 		}
-
-		var backendPath string
-		for _, candidate := range backendCandidates {
-			if _, err := os.Stat(candidate); err == nil {
-				backendPath = candidate
-				break
-			}
+		cmd := exec.Command(path, "server", fmt.Sprintf("--port=%d", opts.port), "--host=127.0.0.1")
+		cmd.Dir = baseDir
+		cmd.Stderr = os.Stderr
+		if opts.showConsole {
+			cmd.Stdout = os.Stdout
 		}
-
-		if backendPath == "" {
-			log.Printf("⚠️  警告: 未找到后端程序，已尝试以下路径:\n")
-			for _, candidate := range backendCandidates {
-				log.Printf("  - %s\n", candidate)
-			}
-		} else {
-			fmt.Printf("🚀 启动后端: %s\n", backendPath)
-			backendCmd = exec.Command(backendPath, "server", fmt.Sprintf("--port=%d", *backendPort))
-			backendCmd.Dir = baseDir
-			configureBackendProcess(backendCmd, *showConsole)
-
-			if *showConsole {
-				backendCmd.Stdout = os.Stdout
-				backendCmd.Stderr = os.Stderr
-			}
-
-			if err := backendCmd.Start(); err != nil {
-				log.Printf("❌ 启动后端失败: %v\n", err)
-			} else {
-				fmt.Println("✅ 后端已启动")
-			}
-
-			// 等待后端启动
-			time.Sleep(2 * time.Second)
+		configureBackendProcess(cmd, opts.showConsole)
+		backend, err = startChild(cmd)
+		if err != nil {
+			return fmt.Errorf("启动后端: %w", err)
 		}
+		defer backend.stop()
+		readyCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		err = waitForBackend(readyCtx, backendURL, backend)
+		cancel()
+		if err != nil {
+			return err
+		}
+		fmt.Printf("后端已就绪: %s\n", backendURL)
 	}
 
-	// 启动前端
-	if !*backendOnly {
-		// 尝试多个可能的前端路径
-		frontendPaths := []string{
-			filepath.Join(baseDir, "frontend", "wx_agent_app.exe"),
-			filepath.Join(baseDir, "wx_agent_app.exe"),
-			filepath.Join(baseDir, "bin", "wx_agent_app", "wx_agent_app.exe"),
+	var frontend *childProcess
+	if !opts.backendOnly {
+		path, err := findExecutable(frontendCandidates(baseDir, runtime.GOOS))
+		if err != nil {
+			return fmt.Errorf("未找到前端程序: %w", err)
 		}
-
-		var frontendPath string
-		for _, p := range frontendPaths {
-			if _, err := os.Stat(p); err == nil {
-				frontendPath = p
-				break
-			}
+		cmd := exec.Command(path)
+		cmd.Dir = filepath.Dir(path)
+		cmd.Env = append(os.Environ(), "WXAGENT_BACKEND_URL="+backendURL)
+		cmd.Stderr = os.Stderr
+		frontend, err = startChild(cmd)
+		if err != nil {
+			return fmt.Errorf("启动前端: %w", err)
 		}
-
-		if frontendPath == "" {
-			log.Printf("⚠️  警告: 未找到前端程序\n")
-		} else {
-			fmt.Printf("🎨 启动前端: %s\n", frontendPath)
-			frontendCmd = exec.Command(frontendPath)
-			frontendCmd.Dir = filepath.Dir(frontendPath)
-
-			// 前端始终显示窗口
-			if err := frontendCmd.Start(); err != nil {
-				log.Printf("❌ 启动前端失败: %v\n", err)
-			} else {
-				fmt.Println("✅ 前端已启动")
-			}
-		}
+		defer frontend.stop()
 	}
 
-	fmt.Println()
-	fmt.Println("----------------------------------------")
-	fmt.Println("WXAgent 已启动！按 Ctrl+C 退出")
-	fmt.Println("----------------------------------------")
-
-	// 等待中断信号
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-	// 等待前端关闭或中断信号
-	done := make(chan struct{})
-
-	if frontendCmd != nil && frontendCmd.Process != nil {
-		go func() {
-			frontendCmd.Wait()
-			close(done)
-		}()
+	fmt.Println("WXAgent 已启动，关闭窗口或按 Ctrl+C 退出。")
+	var backendDone, frontendDone <-chan struct{}
+	if backend != nil {
+		backendDone = backend.done
 	}
-
+	if frontend != nil {
+		frontendDone = frontend.done
+	}
 	select {
-	case <-sigChan:
-		fmt.Println("\n收到退出信号，正在关闭...")
-	case <-done:
-		fmt.Println("\n前端已关闭，正在退出...")
+	case <-ctx.Done():
+		return nil
+	case <-frontendDone:
+		if frontend.err != nil {
+			return fmt.Errorf("前端退出: %w", frontend.err)
+		}
+		return nil
+	case <-backendDone:
+		return fmt.Errorf("后端已退出: %v", backend.err)
 	}
+}
 
-	// 清理：关闭后端
-	if backendCmd != nil && backendCmd.Process != nil {
-		fmt.Println("正在关闭后端...")
-		backendCmd.Process.Kill()
+type childProcess struct {
+	cmd  *exec.Cmd
+	done chan struct{}
+	err  error // Written before done closes; readers wait for done.
+}
+
+func startChild(cmd *exec.Cmd) (*childProcess, error) {
+	if err := cmd.Start(); err != nil {
+		return nil, err
 	}
+	child := &childProcess{cmd: cmd, done: make(chan struct{})}
+	go func() {
+		child.err = cmd.Wait()
+		close(child.done)
+	}()
+	return child, nil
+}
 
-	fmt.Println("WXAgent 已退出")
+func (p *childProcess) stop() {
+	select {
+	case <-p.done:
+		return
+	default:
+		_ = p.cmd.Process.Kill()
+		<-p.done // Reap each process exactly once, including failure paths.
+	}
+}
+
+func waitForBackend(ctx context.Context, baseURL string, process *childProcess) error {
+	client := &http.Client{Timeout: time.Second}
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-process.done:
+			return fmt.Errorf("后端在就绪前退出: %v", process.err)
+		case <-ctx.Done():
+			return fmt.Errorf("等待后端就绪: %w", ctx.Err())
+		default:
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/health", nil)
+		if err != nil {
+			return err
+		}
+		resp, err := client.Do(req)
+		if err == nil {
+			var health struct {
+				Status string `json:"status"`
+			}
+			decodeErr := json.NewDecoder(resp.Body).Decode(&health)
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK && decodeErr == nil && health.Status == "ok" {
+				return nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("等待后端就绪: %w", ctx.Err())
+		case <-process.done:
+			return fmt.Errorf("后端在就绪前退出: %v", process.err)
+		case <-ticker.C:
+		}
+	}
+}
+
+func executableName(name, goos string) string {
+	if goos == "windows" {
+		return name + ".exe"
+	}
+	return name
+}
+
+func backendCandidates(baseDir, goos string) []string {
+	paths := []string{}
+	for _, name := range []string{"wxagent_backend", "wx_agent_backend"} {
+		paths = append(paths, filepath.Join(baseDir, "backend", executableName(name, goos)))
+	}
+	for _, name := range []string{"wxagent_backend", "wx_agent_backend", "wx_agent"} {
+		paths = append(paths, filepath.Join(baseDir, executableName(name, goos)))
+	}
+	return paths
+}
+
+func frontendCandidates(baseDir, goos string) []string {
+	name := executableName("wx_agent_app", goos)
+	paths := []string{
+		filepath.Join(baseDir, "frontend", name),
+		filepath.Join(baseDir, name),
+		filepath.Join(baseDir, "bin", "wx_agent_app", name),
+	}
+	if goos == "darwin" {
+		for _, app := range []string{"wx_agent_app.app", "WXAgent.app"} {
+			paths = append(paths,
+				filepath.Join(baseDir, "frontend", app, "Contents", "MacOS", name),
+				filepath.Join(baseDir, app, "Contents", "MacOS", name),
+			)
+		}
+	}
+	return paths
+}
+
+func findExecutable(candidates []string) (string, error) {
+	for _, path := range candidates {
+		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
+			return path, nil
+		}
+	}
+	return "", fmt.Errorf("已检查 %v", candidates)
 }

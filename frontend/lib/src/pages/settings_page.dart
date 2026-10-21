@@ -125,7 +125,7 @@ class _SettingsPageState extends State<SettingsPage> {
           title: '大模型 API',
           actions: [
             TextButton.icon(
-              onPressed: _savingLlm ? null : _testLlm,
+              onPressed: _loading || _savingLlm ? null : _testLlm,
               icon: const Icon(Icons.bolt),
               label: const Text('测试连接'),
             ),
@@ -158,7 +158,7 @@ class _SettingsPageState extends State<SettingsPage> {
               Align(
                 alignment: Alignment.centerRight,
                 child: ElevatedButton(
-                  onPressed: _savingLlm ? null : _updateLlm,
+                  onPressed: _loading || _savingLlm ? null : _updateLlm,
                   child: _savingLlm
                       ? const SizedBox(
                           width: 18,

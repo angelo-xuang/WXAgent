@@ -1,0 +1,66 @@
+name: Source checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: source-checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+          cache-dependency-path: backend/go.sum
+      - name: Check formatting, tests, and vet
+        shell: bash
+        run: bash scripts/dev.sh check go
+
+  flutter:
+    name: Flutter source
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.35.7'
+          channel: stable
+          cache: true
+      - name: Check formatting, analysis, and widget tests
+        run: bash scripts/dev.sh check flutter
+
+  macos-shell:
+    name: macOS debug shell
+    runs-on: macos-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.35.7'
+          channel: stable
+          cache: true
+      - name: Resolve locked dependencies
+        working-directory: frontend
+        run: flutter pub get --enforce-lockfile
+      - name: Build the macOS UI shell
+        working-directory: frontend
+        run: flutter build macos --debug --no-pub
+      # Build validation only: no publishing, signing credentials, or release uploads.

@@ -1,4 +1,4 @@
-﻿package wxdb
+package wxdb
 
 import (
 	"bytes"

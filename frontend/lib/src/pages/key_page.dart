@@ -1,6 +1,6 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 import '../app.dart';
 import '../models/models.dart';
@@ -21,8 +21,7 @@ class _KeyAcquisitionPageState extends State<KeyAcquisitionPage> {
   bool _statusLoading = false;
   String? _error;
   KeyInfo? _keyInfo;
-  String? _prefPath;
-  bool _prefExists = false;
+  bool _nativeWechat = defaultTargetPlatform == TargetPlatform.windows;
 
   @override
   void initState() {
@@ -31,7 +30,7 @@ class _KeyAcquisitionPageState extends State<KeyAcquisitionPage> {
   }
 
   Future<void> _loadStatus() async {
-    setState(() {
+    _safeSetState(() {
       _statusLoading = true;
       _error = null;
     });
@@ -39,34 +38,35 @@ class _KeyAcquisitionPageState extends State<KeyAcquisitionPage> {
       final status = await widget.controller.api.getStatus();
       final keyData =
           (status['key'] as Map?)?.cast<String, dynamic>() ?? const {};
-      setState(() {
+      _safeSetState(() {
         _keyInfo = KeyInfo.fromJson({
           'db_key': keyData['db_key'],
           'timestamp': keyData['timestamp'],
           'raw': keyData,
         });
-        _prefPath = keyData['pref_path'] as String?;
-        _prefExists = keyData['pref_exists'] == true;
+        _nativeWechat =
+            (status['capabilities'] as Map?)?['native_wechat'] as bool? ??
+            (defaultTargetPlatform == TargetPlatform.windows);
       });
     } catch (err) {
-      setState(() {
+      _safeSetState(() {
         _error = err.toString();
       });
     } finally {
-      setState(() {
+      _safeSetState(() {
         _statusLoading = false;
       });
     }
   }
 
   Future<void> _refreshKey() async {
-    setState(() {
+    _safeSetState(() {
       _loading = true;
       _error = null;
     });
     try {
       final info = await widget.controller.api.refreshKey(autoLaunch: true);
-      setState(() {
+      _safeSetState(() {
         _keyInfo = info;
       });
       if (!mounted) return;
@@ -74,11 +74,11 @@ class _KeyAcquisitionPageState extends State<KeyAcquisitionPage> {
         context,
       ).showSnackBar(const SnackBar(content: Text('密钥读取成功')));
     } catch (err) {
-      setState(() {
+      _safeSetState(() {
         _error = err.toString();
       });
     } finally {
-      setState(() {
+      _safeSetState(() {
         _loading = false;
       });
     }
@@ -94,12 +94,8 @@ class _KeyAcquisitionPageState extends State<KeyAcquisitionPage> {
     ).showSnackBar(const SnackBar(content: Text('已复制数据库密钥')));
   }
 
-  Future<void> _openPrefs() async {
-    if (_prefPath == null || _prefPath!.isEmpty) return;
-    final uri = Uri.file(_prefPath!);
-    if (await canLaunchUrl(uri)) {
-      await launchUrl(uri);
-    }
+  void _safeSetState(VoidCallback update) {
+    if (mounted) setState(update);
   }
 
   @override
@@ -130,13 +126,17 @@ class _KeyAcquisitionPageState extends State<KeyAcquisitionPage> {
               const Text(
                 '· WXAgent 会自动写入 shared_preferences.json，并解析出数据库密钥及图片密钥。',
               ),
+              if (!_nativeWechat) ...[
+                const SizedBox(height: 8),
+                const Text('当前后端不支持本地密钥读取。可连接 Windows 后端，或使用已导出的聊天记录。'),
+              ],
               const SizedBox(height: 8),
               Wrap(
                 spacing: 12,
                 runSpacing: 8,
                 children: [
                   ElevatedButton.icon(
-                    onPressed: _loading ? null : _refreshKey,
+                    onPressed: _loading || !_nativeWechat ? null : _refreshKey,
                     icon: _loading
                         ? const SizedBox(
                             width: 18,
@@ -197,21 +197,6 @@ class _KeyAcquisitionPageState extends State<KeyAcquisitionPage> {
             ],
           ),
         ),
-      ],
-    );
-  }
-
-  Widget _buildStatusRow(String label, String value) {
-    return Row(
-      children: [
-        SizedBox(
-          width: 130,
-          child: Text(
-            label,
-            style: const TextStyle(fontWeight: FontWeight.w600),
-          ),
-        ),
-        Expanded(child: Text(value)),
       ],
     );
   }

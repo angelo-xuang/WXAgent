@@ -40,9 +40,9 @@ class _AnalysisPageState extends State<AnalysisPage> {
       firstDate: DateTime(2015),
       lastDate: DateTime.now().add(const Duration(days: 1)),
     );
-    if (picked == null) return;
+    if (!mounted || picked == null) return;
     final text = DateFormat('yyyy-MM-dd').format(picked);
-    setState(() {
+    _safeSetState(() {
       if (isStart) {
         _startDate = text;
       } else {
@@ -52,7 +52,7 @@ class _AnalysisPageState extends State<AnalysisPage> {
   }
 
   void _clearDate(bool isStart) {
-    setState(() {
+    _safeSetState(() {
       if (isStart) {
         _startDate = null;
       } else {
@@ -62,7 +62,7 @@ class _AnalysisPageState extends State<AnalysisPage> {
   }
 
   Future<void> _runAnalysis() async {
-    setState(() {
+    _safeSetState(() {
       _loading = true;
       _error = null;
     });
@@ -73,18 +73,22 @@ class _AnalysisPageState extends State<AnalysisPage> {
         topN: _topN,
         sessionTypes: _sessionType == 'all' ? null : [_sessionType],
       );
-      setState(() {
+      _safeSetState(() {
         _result = result;
       });
     } catch (err) {
-      setState(() {
+      _safeSetState(() {
         _error = err.toString();
       });
     } finally {
-      setState(() {
+      _safeSetState(() {
         _loading = false;
       });
     }
+  }
+
+  void _safeSetState(VoidCallback update) {
+    if (mounted) setState(update);
   }
 
   @override
@@ -114,67 +118,76 @@ class _AnalysisPageState extends State<AnalysisPage> {
           ],
           child: Column(
             children: [
-              Row(
-                children: [
-                  Expanded(
-                    child: _DateSelector(
-                      label: '开始日期',
-                      value: _startDate,
-                      onPick: () => _pickDate(isStart: true),
-                      onClear: () => _clearDate(true),
-                    ),
-                  ),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: _DateSelector(
-                      label: '结束日期',
-                      value: _endDate,
-                      onPick: () => _pickDate(isStart: false),
-                      onClear: () => _clearDate(false),
-                    ),
-                  ),
-                ],
+              LayoutBuilder(
+                builder: (context, constraints) {
+                  final width = constraints.maxWidth < 560
+                      ? constraints.maxWidth
+                      : (constraints.maxWidth - 16) / 2;
+                  return Wrap(
+                    spacing: 16,
+                    runSpacing: 16,
+                    children: [
+                      SizedBox(
+                        width: width,
+                        child: _DateSelector(
+                          label: '开始日期',
+                          value: _startDate,
+                          onPick: () => _pickDate(isStart: true),
+                          onClear: () => _clearDate(true),
+                        ),
+                      ),
+                      SizedBox(
+                        width: width,
+                        child: _DateSelector(
+                          label: '结束日期',
+                          value: _endDate,
+                          onPick: () => _pickDate(isStart: false),
+                          onClear: () => _clearDate(false),
+                        ),
+                      ),
+                    ],
+                  );
+                },
               ),
               const SizedBox(height: 16),
-              Row(
+              Wrap(
+                spacing: 16,
+                runSpacing: 16,
                 children: [
-                  Expanded(
-                    child: Wrap(
-                      spacing: 12,
-                      children: [
-                        ChoiceChip(
-                          label: const Text('全部'),
-                          selected: _sessionType == 'all',
-                          onSelected: (_) =>
-                              setState(() => _sessionType = 'all'),
-                        ),
-                        ChoiceChip(
-                          label: const Text('群聊'),
-                          selected: _sessionType == 'group',
-                          onSelected: (_) =>
-                              setState(() => _sessionType = 'group'),
-                        ),
-                        ChoiceChip(
-                          label: const Text('私聊'),
-                          selected: _sessionType == 'private',
-                          onSelected: (_) =>
-                              setState(() => _sessionType = 'private'),
-                        ),
-                      ],
-                    ),
+                  Wrap(
+                    spacing: 12,
+                    children: [
+                      ChoiceChip(
+                        label: const Text('全部'),
+                        selected: _sessionType == 'all',
+                        onSelected: (_) =>
+                            _safeSetState(() => _sessionType = 'all'),
+                      ),
+                      ChoiceChip(
+                        label: const Text('群聊'),
+                        selected: _sessionType == 'group',
+                        onSelected: (_) =>
+                            _safeSetState(() => _sessionType = 'group'),
+                      ),
+                      ChoiceChip(
+                        label: const Text('私聊'),
+                        selected: _sessionType == 'private',
+                        onSelected: (_) =>
+                            _safeSetState(() => _sessionType = 'private'),
+                      ),
+                    ],
                   ),
-                  const SizedBox(width: 16),
                   SizedBox(
                     width: 160,
                     child: DropdownButtonFormField<int>(
-                      value: _topN,
+                      initialValue: _topN,
                       decoration: const InputDecoration(labelText: 'Top N'),
                       items: const [5, 10, 20, 50].map((n) {
                         return DropdownMenuItem(value: n, child: Text('$n'));
                       }).toList(),
                       onChanged: (value) {
                         if (value != null) {
-                          setState(() => _topN = value);
+                          _safeSetState(() => _topN = value);
                         }
                       },
                     ),
@@ -292,20 +305,16 @@ class _AnalysisResultView extends StatelessWidget {
           children: [
             _StatCard(label: '总消息数', value: '${result.totalMessages}'),
             _StatCard(label: '覆盖会话', value: '${result.sessionCount}'),
-            _StatCard(
-              label: '群聊',
-              value: '$groupCount 个',
-            ),
-            _StatCard(
-              label: '私聊',
-              value: '$privateCount 个',
-            ),
+            _StatCard(label: '群聊', value: '$groupCount 个'),
+            _StatCard(label: '私聊', value: '$privateCount 个'),
           ],
         ),
         const SizedBox(height: 24),
         Text(
           '活跃时间段分布',
-          style: Theme.of(context).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w600),
+          style: Theme.of(
+            context,
+          ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w600),
         ),
         const SizedBox(height: 12),
         SizedBox(
@@ -315,7 +324,9 @@ class _AnalysisResultView extends StatelessWidget {
         const SizedBox(height: 20),
         Text(
           '高频会话 Top ${result.top.length}',
-          style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
+          style: Theme.of(
+            context,
+          ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
         ),
         const SizedBox(height: 12),
         _buildTopTable(),
@@ -342,20 +353,21 @@ class _AnalysisResultView extends StatelessWidget {
           final categoryLabel = category == 'group'
               ? '群聊'
               : category == 'private'
-                  ? '私聊'
-                  : category;
+              ? '私聊'
+              : category;
           final sent = item.sentMessages ?? 0;
           final received = item.receivedMessages ?? 0;
           final messageText = '${item.messages} 条\n发送 $sent / 接收 $received';
-          
+
           // 消息类型统计
           final textCount = item.textMessages ?? 0;
           final imageCount = item.imageMessages ?? 0;
           final voiceCount = item.voiceMessages ?? 0;
           final videoCount = item.videoMessages ?? 0;
           final otherCount = item.otherMessages ?? 0;
-          final typeText = '文本 $textCount\n图片 $imageCount / 语音 $voiceCount / 视频 $videoCount / 其他 $otherCount';
-          
+          final typeText =
+              '文本 $textCount\n图片 $imageCount / 语音 $voiceCount / 视频 $videoCount / 其他 $otherCount';
+
           // 活跃天数
           final activeDays = item.activeDays ?? 0;
 
@@ -373,15 +385,22 @@ class _AnalysisResultView extends StatelessWidget {
               ),
               DataCell(
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 4,
+                  ),
                   decoration: BoxDecoration(
-                    color: categoryLabel == '群聊' ? Colors.blue.shade100 : Colors.green.shade100,
+                    color: categoryLabel == '群聊'
+                        ? Colors.blue.shade100
+                        : Colors.green.shade100,
                     borderRadius: BorderRadius.circular(4),
                   ),
                   child: Text(
                     categoryLabel,
                     style: TextStyle(
-                      color: categoryLabel == '群聊' ? Colors.blue.shade800 : Colors.green.shade800,
+                      color: categoryLabel == '群聊'
+                          ? Colors.blue.shade800
+                          : Colors.green.shade800,
                       fontWeight: FontWeight.w500,
                     ),
                   ),
@@ -397,6 +416,7 @@ class _AnalysisResultView extends StatelessWidget {
     );
   }
 }
+
 class _StatCard extends StatelessWidget {
   const _StatCard({required this.label, required this.value});
 
@@ -436,8 +456,14 @@ class _HourlyDistributionChart extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final normalized = List<int>.generate(24, (index) => index < data.length ? data[index] : 0);
-    final maxValue = normalized.fold<int>(0, (prev, value) => math.max(prev, value));
+    final normalized = List<int>.generate(
+      24,
+      (index) => index < data.length ? data[index] : 0,
+    );
+    final maxValue = normalized.fold<int>(
+      0,
+      (prev, value) => math.max(prev, value),
+    );
     if (maxValue == 0) {
       return Container(
         decoration: BoxDecoration(
@@ -476,10 +502,16 @@ class _HourlyDistributionChart extends StatelessWidget {
                               ),
                             const SizedBox(height: 2),
                             Container(
-                              height: barMaxHeight * (normalized[i] / maxValue).clamp(0.0, 1.0),
+                              height:
+                                  barMaxHeight *
+                                  (normalized[i] / maxValue).clamp(0.0, 1.0),
                               decoration: BoxDecoration(
-                                color: Theme.of(context).colorScheme.primary.withOpacity(0.75),
-                                borderRadius: const BorderRadius.vertical(top: Radius.circular(4)),
+                                color: Theme.of(
+                                  context,
+                                ).colorScheme.primary.withValues(alpha: 0.75),
+                                borderRadius: const BorderRadius.vertical(
+                                  top: Radius.circular(4),
+                                ),
                               ),
                             ),
                           ],
@@ -498,7 +530,10 @@ class _HourlyDistributionChart extends StatelessWidget {
                     Expanded(
                       child: Text(
                         i % 3 == 0 ? '${i.toString().padLeft(2, '0')}时' : '',
-                        style: const TextStyle(fontSize: 10, color: Colors.grey),
+                        style: const TextStyle(
+                          fontSize: 10,
+                          color: Colors.grey,
+                        ),
                         textAlign: TextAlign.center,
                       ),
                     ),

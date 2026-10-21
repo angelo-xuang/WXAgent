@@ -4,11 +4,8 @@ import 'dart:io';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
-import 'package:path/path.dart' as p;
-import 'package:url_launcher/url_launcher.dart';
 
 import '../app.dart';
-import '../models/models.dart';
 import '../widgets/page_container.dart';
 import '../widgets/section_card.dart';
 
@@ -24,7 +21,6 @@ class ChatDataPage extends StatefulWidget {
 class _ChatDataPageState extends State<ChatDataPage> {
   final TextEditingController _wechatPathCtrl = TextEditingController();
   final TextEditingController _exportDirCtrl = TextEditingController();
-  final TextEditingController _customOutputCtrl = TextEditingController();
 
   bool _loading = false;
   bool _actionLoading = false;
@@ -32,24 +28,22 @@ class _ChatDataPageState extends State<ChatDataPage> {
   bool _autoDetectTried = false;
   String? _error;
   Map<String, dynamic>? _statusExport;
-  List<SessionMeta> _sessions = const [];
-  List<SessionMeta> _sessionPool = const [];
-  Set<String> _selectedSessionFiles = <String>{};
-  bool _sessionsLoading = false;
-  String _sessionSearch = '';
-  String? _sessionFilter;
-  DateTimeRange? _manualRange;
-  bool _manualExporting = false;
-  bool _singleFileExport = true;
-  String? _customOutputDir;
   bool _fullRefreshRunning = false;
+  bool _nativeWechat = Platform.isWindows;
   Map<String, dynamic>? _lastFullRefresh;
   DateTime? _lastFullRefreshAt;
   List<String>? _refreshLogs;
   final ScrollController _refreshLogCtrl = ScrollController();
   bool _refreshUserScrolling = false;
 
-  final DateFormat _dateFormatter = DateFormat('yyyy-MM-dd');
+  bool get _canDetectLocalData =>
+      Platform.isWindows &&
+      _nativeWechat &&
+      const [
+        '127.0.0.1',
+        'localhost',
+        '::1',
+      ].contains(Uri.tryParse(widget.controller.baseUrl)?.host);
 
   @override
   void initState() {
@@ -61,7 +55,6 @@ class _ChatDataPageState extends State<ChatDataPage> {
   void dispose() {
     _wechatPathCtrl.dispose();
     _exportDirCtrl.dispose();
-    _customOutputCtrl.dispose();
     _refreshLogCtrl.dispose();
     super.dispose();
   }
@@ -76,16 +69,20 @@ class _ChatDataPageState extends State<ChatDataPage> {
       final config =
           (configResp['data'] as Map?)?.cast<String, dynamic>() ?? const {};
       final status = await widget.controller.api.getStatus();
-      final sessions = await widget.controller.api.listExportStates();
       final detectedWechatPath = config['wechat_data_path'] as String? ?? '';
       final detectedExportDir = config['export_dir'] as String? ?? '';
       _safeSetState(() {
         _wechatPathCtrl.text = detectedWechatPath;
         _exportDirCtrl.text = detectedExportDir;
         _statusExport = (status['export'] as Map?)?.cast<String, dynamic>();
-        _sessions = sessions;
+        final capabilities = status['capabilities'] as Map?;
+        _nativeWechat =
+            capabilities?['native_wechat'] as bool? ?? Platform.isWindows;
       });
-      if (detectedWechatPath.isEmpty && !_autoDetectTried) {
+      if (mounted &&
+          _canDetectLocalData &&
+          detectedWechatPath.isEmpty &&
+          !_autoDetectTried) {
         _autoDetectTried = true;
         unawaited(_autoDetectWechatPath());
       }
@@ -106,13 +103,13 @@ class _ChatDataPageState extends State<ChatDataPage> {
     required String field,
   }) async {
     final path = await getDirectoryPath(confirmButtonText: '选择 $label');
-    if (path == null) return;
+    if (!mounted || path == null) return;
     await _updateConfig(field, path);
-    controller.text = path;
+    if (mounted && _error == null) controller.text = path;
   }
 
   Future<void> _autoDetectWechatPath() async {
-    if (_detectingPath) return;
+    if (!mounted || !_canDetectLocalData || _detectingPath) return;
     _safeSetState(() {
       _detectingPath = true;
       _error = null;
@@ -123,7 +120,7 @@ class _ChatDataPageState extends State<ChatDataPage> {
           Platform.environment['HOME'] ??
           '';
       if (homeDir.isEmpty) {
-        throw Exception('Unable to determine current user directory');
+        throw Exception('无法确定当前用户目录');
       }
       final sep = Platform.pathSeparator;
       final candidates = [
@@ -140,6 +137,7 @@ class _ChatDataPageState extends State<ChatDataPage> {
           if (entity is! Directory) continue;
           final dbStorage = Directory('${entity.path}${sep}db_storage');
           if (await dbStorage.exists()) {
+            if (!mounted) return;
             await widget.controller.api.updateConfig({
               'wechat_data_path': base,
             });
@@ -147,22 +145,20 @@ class _ChatDataPageState extends State<ChatDataPage> {
               _wechatPathCtrl.text = base;
             });
             if (mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                  content: Text('Detected WeChat data directory: $base'),
-                ),
-              );
+              ScaffoldMessenger.of(
+                context,
+              ).showSnackBar(SnackBar(content: Text('已检测到微信数据目录：$base')));
             }
             return;
           }
         }
       }
       _safeSetState(() {
-        _error = 'Auto detection failed, please select the directory manually.';
+        _error = '未找到微信数据目录，请手动选择。';
       });
     } catch (err) {
       _safeSetState(() {
-        _error = 'Auto detection failed: $err';
+        _error = '自动检测失败：$err';
       });
     } finally {
       _safeSetState(() {
@@ -181,7 +177,7 @@ class _ChatDataPageState extends State<ChatDataPage> {
       if (!mounted) return;
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(SnackBar(content: Text('Updated $field')));
+      ).showSnackBar(SnackBar(content: Text('目录设置已更新')));
     } catch (err) {
       _safeSetState(() {
         _error = err.toString();
@@ -189,195 +185,6 @@ class _ChatDataPageState extends State<ChatDataPage> {
     } finally {
       _safeSetState(() {
         _actionLoading = false;
-      });
-    }
-  }
-
-  Future<void> _openFile(String? path) async {
-    if (path == null || path.isEmpty) return;
-
-    final exportDir = _exportDirCtrl.text.trim();
-
-    // 优先使用绝对路径；否则尝试基于导出目录拼接
-    String fullPath = path;
-    if (!p.isAbsolute(fullPath) && exportDir.isNotEmpty) {
-      fullPath = p.normalize(p.join(exportDir, fullPath));
-    }
-
-    // 如果仍不存在，再尝试 export_dir/chat_history 下的文件
-    if (!File(fullPath).existsSync() &&
-        exportDir.isNotEmpty &&
-        !p.isAbsolute(path)) {
-      final candidate = p.normalize(p.join(exportDir, 'chat_history', path));
-      if (File(candidate).existsSync()) {
-        fullPath = candidate;
-      }
-    }
-
-    // Windows: 直接用默认应用打开文件；其他平台仍用 URL 方案
-    if (Platform.isWindows) {
-      await Process.run('powershell', [
-        '-NoProfile',
-        '-Command',
-        'Start-Process',
-        fullPath,
-      ]);
-      return;
-    }
-
-    await launchUrl(Uri.file(fullPath));
-  }
-
-  Future<void> _loadSessionPool() async {
-    _safeSetState(() {
-      _sessionsLoading = true;
-    });
-    try {
-      final sessions = await widget.controller.api.listSessions();
-      final validFiles = sessions
-          .map((s) => s.file)
-          .whereType<String>()
-          .where((path) => path.isNotEmpty)
-          .toSet();
-      _safeSetState(() {
-        _sessionPool = sessions;
-        _sessionsLoading = false;
-        _selectedSessionFiles.removeWhere((file) => !validFiles.contains(file));
-      });
-    } catch (err) {
-      _safeSetState(() {
-        _sessionsLoading = false;
-        _error = err.toString();
-      });
-    }
-  }
-
-  List<SessionMeta> get _filteredManualSessions {
-    final query = _sessionSearch.trim().toLowerCase();
-    return _sessionPool.where((session) {
-      final name = session.displayName.toLowerCase();
-      final matchesSearch =
-          query.isEmpty ||
-          name.contains(query) ||
-          session.sessionId.contains(query);
-      final type = (session.category ?? session.sessionType ?? '')
-          .toLowerCase();
-      bool matchesFilter = true;
-      if (_sessionFilter == 'group') {
-        matchesFilter = type.contains('group') || type.contains('chatroom');
-      } else if (_sessionFilter == 'single') {
-        matchesFilter =
-            type.contains('single') ||
-            (!type.contains('chatroom') && !type.contains('group'));
-      }
-      return matchesSearch && matchesFilter;
-    }).toList();
-  }
-
-  void _toggleSessionSelection(String? file) {
-    if (file == null || file.isEmpty) return;
-    _safeSetState(() {
-      if (_selectedSessionFiles.contains(file)) {
-        _selectedSessionFiles.remove(file);
-      } else {
-        _selectedSessionFiles.add(file);
-      }
-    });
-  }
-
-  void _toggleSelectAllSessions(bool selectAll) {
-    final items = _filteredManualSessions
-        .map((session) => session.file)
-        .whereType<String>()
-        .where((path) => path.isNotEmpty)
-        .toList();
-    _safeSetState(() {
-      if (selectAll) {
-        _selectedSessionFiles = items.toSet();
-      } else {
-        _selectedSessionFiles.clear();
-      }
-    });
-  }
-
-  Future<void> _pickManualRange() async {
-    final initial =
-        _manualRange ??
-        DateTimeRange(
-          start: DateTime.now().subtract(const Duration(days: 7)),
-          end: DateTime.now(),
-        );
-    final picked = await showDateRangePicker(
-      context: context,
-      initialDateRange: initial,
-      firstDate: DateTime(2013, 1, 1),
-      lastDate: DateTime.now(),
-    );
-    if (picked != null) {
-      _safeSetState(() {
-        _manualRange = picked;
-      });
-    }
-  }
-
-  void _clearManualRange() {
-    _safeSetState(() {
-      _manualRange = null;
-    });
-  }
-
-  Future<void> _pickManualOutputDir() async {
-    final picked = await getDirectoryPath(confirmButtonText: '选择导出目录');
-    if (picked != null) {
-      _safeSetState(() {
-        _customOutputDir = picked;
-      });
-    }
-  }
-
-  Future<void> _runManualExport() async {
-    if (_selectedSessionFiles.isEmpty) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Select at least one session to export'),
-          ),
-        );
-      }
-      return;
-    }
-    final startDate = _manualRange == null
-        ? null
-        : _dateFormatter.format(_manualRange!.start);
-    final endDate = _manualRange == null
-        ? null
-        : _dateFormatter.format(_manualRange!.end);
-    _safeSetState(() {
-      _manualExporting = true;
-      _error = null;
-    });
-    try {
-      final response = await widget.controller.api.exportFiltered(
-        files: _selectedSessionFiles.toList(),
-        startDate: startDate,
-        endDate: endDate,
-        outputDir: _customOutputDir?.isEmpty ?? true ? null : _customOutputDir,
-        singleFile: _singleFileExport,
-      );
-      if (!mounted) return;
-      final exported = (response['files'] as List?)?.cast<String>() ?? const [];
-      final count = response['count'] ?? exported.length;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Exported $count messages')));
-      await _loadData();
-    } catch (err) {
-      _safeSetState(() {
-        _error = err.toString();
-      });
-    } finally {
-      _safeSetState(() {
-        _manualExporting = false;
       });
     }
   }
@@ -439,19 +246,10 @@ class _ChatDataPageState extends State<ChatDataPage> {
     }
   }
 
-  String _manualRangeLabel() {
-    if (_manualRange == null) {
-      return '全部时间';
-    }
-    final start = _dateFormatter.format(_manualRange!.start);
-    final end = _dateFormatter.format(_manualRange!.end);
-    return '$start - $end';
-  }
-
   void _scrollRefreshLogs() {
     if (_refreshUserScrolling) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_refreshLogCtrl.hasClients) {
+      if (mounted && _refreshLogCtrl.hasClients) {
         _refreshLogCtrl.animateTo(
           _refreshLogCtrl.position.maxScrollExtent,
           duration: const Duration(milliseconds: 120),
@@ -459,185 +257,6 @@ class _ChatDataPageState extends State<ChatDataPage> {
         );
       }
     });
-  }
-
-  Widget _buildManualExportPanel() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            Expanded(
-              child: TextField(
-                decoration: const InputDecoration(
-                  labelText: '搜索会话',
-                  prefixIcon: Icon(Icons.search),
-                ),
-                onChanged: (value) => _safeSetState(() {
-                  _sessionSearch = value;
-                }),
-              ),
-            ),
-            const SizedBox(width: 12),
-            OutlinedButton.icon(
-              onPressed: _sessionsLoading ? null : () => _loadSessionPool(),
-              icon: const Icon(Icons.refresh),
-              label: const Text('刷新会话'),
-            ),
-          ],
-        ),
-        const SizedBox(height: 12),
-        Wrap(
-          spacing: 8,
-          children: [
-            _buildFilterChip('全部', null),
-            _buildFilterChip('单聊', 'single'),
-            _buildFilterChip('群聊', 'group'),
-          ],
-        ),
-        Align(
-          alignment: Alignment.centerRight,
-          child: Wrap(
-            spacing: 8,
-            children: [
-              TextButton(
-                onPressed: () => _toggleSelectAllSessions(true),
-                child: const Text('全选筛选结果'),
-              ),
-              TextButton(
-                onPressed: () => _toggleSelectAllSessions(false),
-                child: const Text('清空选择'),
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 16),
-        SizedBox(height: 280, child: _buildSessionList()),
-        Padding(
-          padding: const EdgeInsets.only(top: 8),
-          child: Text(
-            '已选择 ${_selectedSessionFiles.length} 个会话',
-            style: TextStyle(color: Colors.grey.shade600),
-          ),
-        ),
-        const SizedBox(height: 16),
-        Wrap(
-          spacing: 12,
-          runSpacing: 8,
-          children: [
-            OutlinedButton.icon(
-              onPressed: _manualRange == null ? null : _clearManualRange,
-              icon: const Icon(Icons.clear_all),
-              label: const Text('清除时间范围'),
-            ),
-            ElevatedButton.icon(
-              onPressed: _pickManualRange,
-              icon: const Icon(Icons.date_range),
-              label: Text(_manualRangeLabel()),
-            ),
-          ],
-        ),
-        SwitchListTile(
-          value: _singleFileExport,
-          onChanged: (value) => _safeSetState(() {
-            _singleFileExport = value;
-          }),
-          title: const Text('合并为单个 JSON 文件'),
-          subtitle: const Text('关闭后将为每个会话生成独立文件'),
-        ),
-        const SizedBox(height: 8),
-        Row(
-          children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text('自定义输出目录（可选）'),
-                  Text(
-                    _customOutputDir?.isNotEmpty == true
-                        ? _customOutputDir!
-                        : '留空则使用配置文件中的导出目录',
-                    style: TextStyle(color: Colors.grey.shade600),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(width: 12),
-            OutlinedButton.icon(
-              onPressed: _pickManualOutputDir,
-              icon: const Icon(Icons.folder_open),
-              label: const Text('选择'),
-            ),
-          ],
-        ),
-        const SizedBox(height: 16),
-        Align(
-          alignment: Alignment.centerRight,
-          child: ElevatedButton.icon(
-            onPressed: _manualExporting ? null : _runManualExport,
-            icon: _manualExporting
-                ? const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      valueColor: AlwaysStoppedAnimation(Colors.white),
-                    ),
-                  )
-                : const Icon(Icons.file_upload),
-            label: const Text('导出选中会话'),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildSessionList() {
-    if (_sessionsLoading) {
-      return const Center(child: CircularProgressIndicator());
-    }
-    final sessions = _filteredManualSessions;
-    if (sessions.isEmpty) {
-      return const Center(child: Text('未检测到可导出的会话，请先刷新或执行解密导出。'));
-    }
-    return ListView.separated(
-      itemCount: sessions.length,
-      separatorBuilder: (_, __) => const Divider(height: 1),
-      itemBuilder: (context, index) {
-        final session = sessions[index];
-        final file = session.file;
-        final enabled = file != null && file.isNotEmpty;
-        final selected = enabled && _selectedSessionFiles.contains(file);
-        final subtitle = StringBuffer();
-        if (session.messages > 0) {
-          subtitle.write('消息 ${session.messages}');
-        }
-        if (session.lastTimestamp != null) {
-          subtitle
-            ..write(' · ')
-            ..write(session.lastTimestamp);
-        }
-        return CheckboxListTile(
-          dense: true,
-          enabled: enabled,
-          value: selected,
-          onChanged: enabled ? (_) => _toggleSessionSelection(file) : null,
-          title: Text(session.displayName),
-          subtitle: subtitle.isEmpty ? null : Text(subtitle.toString()),
-        );
-      },
-    );
-  }
-
-  Widget _buildFilterChip(String label, String? filterValue) {
-    final selected = _sessionFilter == filterValue;
-    return ChoiceChip(
-      label: Text(label),
-      selected: selected,
-      onSelected: (_) => _safeSetState(() {
-        _sessionFilter = filterValue;
-      }),
-    );
   }
 
   void _safeSetState(VoidCallback fn) {
@@ -748,7 +367,8 @@ class _ChatDataPageState extends State<ChatDataPage> {
       children: [
         SectionCard(
           title: '聊天数据源配置',
-          subtitle: '指向微信本地数据目录和导出目录，WXAgent 会根据路径直接读取数据库。如果自动检测微信数据路径失败，请根据微信设置中的xwechat_files路径手动选择。如C:\\Users\\用户名\\xwechat_files。',
+          subtitle:
+              '指向微信本地数据目录和导出目录，WXAgent 会根据路径直接读取数据库。如果自动检测微信数据路径失败，请根据微信设置中的xwechat_files路径手动选择。如C:\\Users\\用户名\\xwechat_files。',
           actions: [
             TextButton.icon(
               onPressed: _loading ? null : _loadData,
@@ -777,7 +397,9 @@ class _ChatDataPageState extends State<ChatDataPage> {
               Align(
                 alignment: Alignment.centerLeft,
                 child: TextButton.icon(
-                  onPressed: _actionLoading ? null : _autoDetectWechatPath,
+                  onPressed: _actionLoading || !_canDetectLocalData
+                      ? null
+                      : _autoDetectWechatPath,
                   icon: const Icon(Icons.auto_fix_high_rounded),
                   label: const Text('自动检测'),
                 ),
@@ -817,7 +439,9 @@ class _ChatDataPageState extends State<ChatDataPage> {
                 runSpacing: 8,
                 children: [
                   ElevatedButton.icon(
-                    onPressed: _fullRefreshRunning ? null : _runFullRefresh,
+                    onPressed: _fullRefreshRunning || !_nativeWechat
+                        ? null
+                        : _runFullRefresh,
                     icon: _fullRefreshRunning
                         ? const SizedBox(
                             width: 18,
@@ -832,6 +456,10 @@ class _ChatDataPageState extends State<ChatDataPage> {
                   ),
                 ],
               ),
+              if (!_nativeWechat) ...[
+                const SizedBox(height: 12),
+                const Text('当前后端不支持本地微信解密导出，可继续分析和总结已导出的聊天记录。'),
+              ],
               if (_fullRefreshRunning ||
                   (_refreshLogs != null && _refreshLogs!.isNotEmpty)) ...[
                 const SizedBox(height: 12),
@@ -948,7 +576,6 @@ class _ChatDataPageState extends State<ChatDataPage> {
       ],
     );
   }
-
 }
 
 class _PathField extends StatelessWidget {

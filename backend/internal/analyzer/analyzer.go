@@ -206,6 +206,9 @@ func (a *Analyzer) Analyze(ctx context.Context, opts AnalyzeOptions) (*AnalyzeRe
 
 // AnalyzeStream 执行分析并通过回调发送流式事件
 func (a *Analyzer) AnalyzeStream(ctx context.Context, opts AnalyzeOptions, callback StreamCallback) (*AnalyzeResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	// 辅助函数：发送日志事件
 	sendLog := func(step int, format string, args ...interface{}) {
 		msg := fmt.Sprintf(format, args...)
@@ -253,6 +256,9 @@ func (a *Analyzer) AnalyzeStream(ctx context.Context, opts AnalyzeOptions, callb
 
 	// Step 1: 加载消息
 	logAndSend(1, "🔍 Step 1: 加载并合并所有JSON消息...")
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	sessionMessagesList, err := a.loadAndMergeMessagesBySession(opts)
 	if err != nil {
 		return nil, fmt.Errorf("load messages: %w", err)
@@ -287,6 +293,9 @@ func (a *Analyzer) AnalyzeStream(ctx context.Context, opts AnalyzeOptions, callb
 	for i, chunk := range chunks {
 		logAndSend(4, "  处理第 %d/%d 段...", i+1, len(chunks))
 		sendProgress(4, i+1, len(chunks))
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 
 		// 使用流式 API
 		summary, err := a.summarizeChunkStream(ctx, chunk, i+1, len(chunks), opts.ChunkPrompt, func(content string) {
@@ -301,6 +310,9 @@ func (a *Analyzer) AnalyzeStream(ctx context.Context, opts AnalyzeOptions, callb
 
 	// Step 5: 合并总结
 	logAndSend(5, "\n🔄 Step 5: 合并所有总结生成最终报告...")
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	finalSummary, err := a.mergeSummariesStream(ctx, chunkSummaries, opts.FinalPrompt, func(content string) {
 		sendAIChunk(5, content)
 	})
@@ -311,6 +323,11 @@ func (a *Analyzer) AnalyzeStream(ctx context.Context, opts AnalyzeOptions, callb
 
 	// Step 6: 保存报告
 	logAndSend(6, "\n💾 Step 6: 保存分析报告...")
+	// A provider may finish just as the user cancels. Do not publish that result
+	// merely because the last network read happened to finish first.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err := a.saveReport(opts.OutputFile, sessionNames, totalMessages, opts.StartDate, opts.EndDate, chunkSummaries, finalSummary); err != nil {
 		return nil, fmt.Errorf("save report: %w", err)
 	}

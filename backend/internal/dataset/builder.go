@@ -116,6 +116,7 @@ type BuildResult struct {
 }
 
 type SessionStat struct {
+	SessionID     string `json:"session_id"`
 	DisplayName   string `json:"display_name"`
 	Messages      int    `json:"messages"`
 	LastTimestamp int64  `json:"last_timestamp"`
@@ -169,7 +170,7 @@ func (b *Builder) Build(startDate, endDate string, incremental bool, allowedSess
 
 		lastProcessedTs := int64(0)
 		if incremental {
-			lastProcessedTs = b.state.LastTimestamp(log.Session.WxID)
+			lastProcessedTs = b.state.LastSummaryTimestamp(log.Session.WxID)
 		}
 
 		filteredMsgs := []string{}
@@ -196,15 +197,13 @@ func (b *Builder) Build(startDate, endDate string, incremental bool, allowedSess
 		}
 
 		if len(filteredMsgs) > 0 {
-			dataset[sessionName] = filteredMsgs
+			dataset[sessionName] = append(dataset[sessionName], filteredMsgs...)
 			stats = append(stats, SessionStat{
+				SessionID:     log.Session.WxID,
 				DisplayName:   sessionName,
 				Messages:      len(filteredMsgs),
 				LastTimestamp: maxTs,
 			})
-
-			// Update state in memory (caller should save)
-			b.state.UpdateSession(log.Session.WxID, maxTs, len(filteredMsgs))
 		}
 	}
 
