@@ -9,11 +9,23 @@ $version = $cliVersion.version
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('WXAgentInstallerTest-' + [guid]::NewGuid().ToString('N'))
 $package = Join-Path $testRoot 'package'
 $unicode = [string][char]0x6D4B + [string][char]0x8BD5
-$installRoot = Join-Path $testRoot ($unicode + ' app')
-$dataRoot = Join-Path $testRoot ($unicode + ' data')
+$fakeLocalAppData = Join-Path $testRoot ($unicode + ' profile')
+$installRoot = Join-Path $fakeLocalAppData 'Programs\WXAgent'
+$dataRoot = Join-Path $fakeLocalAppData 'WXAgent'
 $installer = Join-Path $PSScriptRoot 'install_windows.ps1'
 $uninstaller = Join-Path $PSScriptRoot 'uninstall_windows.ps1'
 $beforePath = [Environment]::GetEnvironmentVariable('Path', 'User')
+function Invoke-FileEntry([string]$ScriptPath) {
+    $previousLocalAppData = $env:LOCALAPPDATA
+    try {
+        # Exercise the same -File/default-directory entry used by Install.cmd.
+        # The child inherits only this temporary profile and skips registration.
+        $env:LOCALAPPDATA = $fakeLocalAppData
+        $windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $ScriptPath -SkipRegistration
+        if ($LASTEXITCODE -ne 0) { throw "Windows PowerShell -File entry failed: $ScriptPath" }
+    } finally { $env:LOCALAPPDATA = $previousLocalAppData }
+}
 function Write-Manifest {
     $files = @(Get-ChildItem -LiteralPath $package -Recurse -File | Where-Object Name -ne 'release-manifest.json' | ForEach-Object {
         @{ path = $_.FullName.Substring($package.Length + 1).Replace('\', '/'); sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(); size = $_.Length }
@@ -38,7 +50,7 @@ try {
     [IO.File]::WriteAllText((Join-Path $package 'frontend\wx_agent_app.exe'), 'GUI fixture')
     [IO.File]::WriteAllText((Join-Path $package 'config.json'), '{"wx_key_shared_prefs":"~/AppData/Roaming/com.example/wx_key/shared_preferences.json"}')
     Write-Manifest
-    & $installer -PackageDir $package -InstallRoot $installRoot -DataRoot $dataRoot -SkipRegistration
+    Invoke-FileEntry (Join-Path $package 'install_windows.ps1')
     $shim = Join-Path $installRoot 'bin\wxagent.cmd'
     $installedVersion = & $shim version | ConvertFrom-Json
     if ($LASTEXITCODE -ne 0 -or $installedVersion.version -ne $version) { throw 'The installed Unicode-path CLI wrapper failed.' }
@@ -78,12 +90,12 @@ try {
     Assert-Fails { & $installer -PackageDir $package -InstallRoot $installRoot -DataRoot $dataRoot -SkipRegistration } 'different contents'
     Assert-Hash $config $configHash
     Assert-Hash $database $databaseHash
-    & $uninstaller -InstallRoot $installRoot -SkipRegistration
+    Invoke-FileEntry (Join-Path $installRoot 'uninstall_windows.ps1')
     if (Test-Path -LiteralPath $installRoot) { throw 'Application directory still exists after uninstall.' }
     Assert-Hash $config $configHash
     Assert-Hash $database $databaseHash
     if ([Environment]::GetEnvironmentVariable('Path', 'User') -ne $beforePath) { throw 'Isolated test changed the user PATH.' }
-    Write-Host 'PASS: Unicode paths, CLI exit codes, import/query, immutable reinstall, checksum/path rejection, data-preserving uninstall.'
+    Write-Host 'PASS: Windows PowerShell -File/default paths, Unicode paths, CLI exit codes, import/query, immutable reinstall, checksum/path rejection, data-preserving uninstall.'
     $resolved = [IO.Path]::GetFullPath($testRoot)
     $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
     if (-not $resolved.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase) -or (Split-Path -Leaf $resolved) -notlike 'WXAgentInstallerTest-*') { throw 'Unsafe test cleanup path.' }

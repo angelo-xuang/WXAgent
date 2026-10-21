@@ -1,7 +1,7 @@
 # Per-user, versioned WXAgent installation. Compatible with Windows PowerShell 5.1.
 [CmdletBinding()]
 param(
-    [string]$PackageDir = $PSScriptRoot,
+    [string]$PackageDir = '',
     [string]$InstallRoot = (Join-Path $env:LOCALAPPDATA 'Programs\WXAgent'),
     [string]$DataRoot = (Join-Path $env:LOCALAPPDATA 'WXAgent'),
     [switch]$SkipRegistration,
@@ -9,6 +9,9 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+# Windows PowerShell 5.1 does not populate PSScriptRoot while evaluating param
+# defaults under -File. Resolve it in the script body for the Install.cmd entry.
+if ([string]::IsNullOrWhiteSpace($PackageDir)) { $PackageDir = $PSScriptRoot }
 
 function Get-FullPath([string]$Path) {
     return [IO.Path]::GetFullPath($Path).TrimEnd([IO.Path]::DirectorySeparatorChar)
