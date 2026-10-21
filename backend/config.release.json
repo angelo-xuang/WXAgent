@@ -1,36 +1,11 @@
 {
-  "export_dir": "./output",
-  "summary_output": "./output/summary_result.md",
-  "summary_history_dir": "./output/history",
-  "state_file": "./output/.wx_agent_state.json",
+  "database_path": "./data/wxagent.db",
+  "export_dir": "./exports",
+  "state_file": "./.wxagent/state.json",
   "wechat_data_path": "",
   "wx_key_shared_prefs": "~/AppData/Roaming/com.example/wx_key/shared_preferences.json",
   "wx_key_command": {
     "path": "./modules/wx_key/wx_key.exe",
     "cwd": "./modules/wx_key"
-  },
-  "echotrace_command": {
-    "path": "./modules/echotrace/echotrace.exe",
-    "cwd": "./modules/echotrace"
-  },
-  "custom_questions": [
-    "今天有哪些重要的事情？",
-    "有哪些招聘或工作相关的信息？",
-    "有哪些活动或聚会安排？"
-  ],
-  "llm": {
-    "provider": "deepseek",
-    "model": "deepseek-chat",
-    "api_key": "",
-    "base_url": "https://api.deepseek.com/v1",
-    "temperature": 0.7,
-    "timeout": 120
-  },
-  "max_tokens": 60000,
-  "overlap_tokens": 800,
-  "api_max_tokens": 98304,
-  "map_concurrency": 3,
-  "qa_context_tokens": 20000,
-  "qa_overlap_tokens": 400,
-  "qa_max_batches": 4
+  }
 }

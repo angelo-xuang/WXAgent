@@ -1,183 +1,105 @@
 # WXAgent 发布指南
 
-本文档说明如何打包和发布 WXAgent 应用程序。
+WXAgent 以本地 SQLite 聊天记录索引库为核心，提供独立 CLI、可选桌面界面和本地 HTTP 接口。Windows 发布包包含现有的微信连接工具；不包含 AI 分析、模型配置或 EchoTrace 桌面应用。
 
-## 项目结构
+## 构建环境
 
-```
-WXAgent/
-├── backend/           # Go 后端
-├── frontend/          # Flutter 前端
-├── launcher/          # 启动器程序
-├── modules/           # 子模块 (echotrace, wx_key)
-├── scripts/           # 构建脚本
-└── release/           # 打包输出目录
-```
+- Windows 10/11 x64。
+- Go 1.24 或更高版本；以 `backend/go.mod` 为准。
+- Flutter 3.35.7，Dart 3.9.2，与源码检查环境保持一致。
+- Visual Studio 2022 的“使用 C++ 的桌面开发”工作负载、Windows SDK 和 VC143 x64 可再发行运行库。
+- Go、Flutter、Git 已加入 PATH。
 
-## 环境要求
+构建使用现有 Go 和 Flutter 依赖锁定文件，不升级依赖。运行发布包不需要 Go、Flutter 或 Visual Studio；包内为桌面组件附带 VC143 x64 运行库。
 
-### 构建环境
-- **Go** 1.21 或更高版本
-- **Flutter** 3.x 或更高版本
-- **Windows** 10/11 (64-bit)
+## 发布前检查
 
-### 运行环境
-- **Windows** 10/11 (64-bit)
-- 无需安装 Go 或 Flutter
-
-## 一键打包
-
-### 方法 1: 使用批处理脚本
-
-```batch
-cd scripts
-build_release.bat
-```
-
-### 方法 2: 使用 PowerShell 脚本
+1. 更新 `frontend/pubspec.yaml`、根目录 `CHANGELOG.md`、README 和快速开始中的版本说明。
+2. 执行源码检查，检查安装脚本及发布配置，不使用真实聊天记录作为测试材料。
+3. 提交全部发布源码。构建要求已跟踪文件没有未提交改动，产物记录对应的 Git commit。
 
 ```powershell
-cd scripts
-.\build_release.ps1 -Configuration Release -OutputDir ".\release"
+.\scripts\dev.ps1 check
+git status --short
 ```
 
-## 手动构建步骤
+## 构建 v1.1.0
 
-如果需要单独构建各组件：
+在仓库根目录执行：
 
-### 1. 构建后端
-
-```bash
-cd backend
-go build -ldflags="-s -w" -o wxagent_backend.exe ./cmd/wxagent_backend
+```powershell
+.\scripts\build_release.ps1 -Version 1.1.0 -BuildNumber 2
 ```
 
-### 2. 构建前端
+也可通过批处理调用同一流程：
 
-```bash
-cd frontend
-flutter pub get
-flutter build windows --release
+```bat
+scripts\build_release.bat -Version 1.1.0 -BuildNumber 2
 ```
 
-构建产物位于: `frontend/build/windows/x64/runner/Release/`
+默认生成三个全新产物：
 
-### 3. 构建启动器
-
-```bash
-cd launcher
-go build -ldflags="-s -w -H=windowsgui" -o WXAgent.exe .
+```text
+dist/
+├── WXAgent-v1.1.0-windows-x64/
+├── WXAgent-v1.1.0-windows-x64.zip
+└── WXAgent-v1.1.0-windows-x64.zip.sha256
 ```
 
-使用 `-H=windowsgui` 可以隐藏控制台窗口。
+任何目标已存在时，构建直接停止。脚本不会清空旧 `release/`、`dist/`，不会关闭运行中的应用，也不会读取或复制本地数据库、导出数据和开发配置。失败后的唯一临时目录保留供诊断。需要重试时，可指定新的 `-OutputDir dist/WXAgent-v1.1.0-windows-x64-retry`；输出只能位于仓库的 `dist/` 或 `release/` 子目录，且不能经过目录链接。
 
-## 发布包内容
+## 发布包结构
 
-打包完成后，`release/` 目录包含：
-
-```
-release/
-├── WXAgent.exe              # 启动器 (双击即可启动)
-├── config.json              # 配置文件
-├── backend/
-│   └── wxagent_backend.exe   # 后端服务
-├── frontend/
-│   ├── wx_agent_app.exe      # 前端 Flutter 应用
-│   ├── flutter_windows.dll   # Flutter 运行时
-│   └── data/                 # Flutter 资源
-└── modules/                 # 子模块
-    ├── echotrace/          # 数据导出工具
-    └── wx_key/             # 密钥获取工具
-```
-
-## 使用方法
-
-### 推荐方式：使用启动器
-
-双击 `WXAgent.exe`，将自动：
-1. 启动后端服务 (端口 8000)
-2. 启动前端界面
-
-关闭前端窗口时，后端服务也会自动关闭。
-
-### 启动器命令行参数
-
-```bash
-WXAgent.exe [选项]
-
-选项:
-  -port=8080        指定后端端口
-  -console          显示后端控制台输出
-  -backend-only     仅启动后端
-  -frontend-only    仅启动前端
+```text
+WXAgent-v1.1.0-windows-x64/
+├── Install.cmd                  # 双击注册当前用户安装
+├── install_windows.ps1
+├── uninstall_windows.ps1
+├── WXAgent.exe                  # 可选桌面启动器
+├── config.json                  # 不含账号或密钥的相对路径模板
+├── backend/wxagent.exe           # 独立 CLI 与 HTTP 服务
+├── frontend/                    # Flutter 界面与运行库
+├── modules/wx_key/              # 现有 Windows 微信连接工具与运行库
+├── licenses/wx_key.txt
+├── README.md
+├── QUICKSTART.md
+├── CHANGELOG.md
+├── docs/
+├── skills/wxagent-index/SKILL.md
+├── runtime-dependencies.json    # 构建时检查的 DLL 依赖
+└── release-manifest.json        # 版本、源码 commit 与逐文件 SHA256
 ```
 
-### 手动分别启动
+CLI 位于 `backend/`，避免 Windows 上 `wxagent.exe` 与根目录 `WXAgent.exe` 大小写不敏感导致冲突。所有用户数据库和导出目录由运行配置决定，发布包不预置数据。
 
-```bash
-# 启动后端
-backend/wxagent_backend.exe server --port=8000
+## 验收发布包
 
-# 启动前端 (新窗口)
-frontend/wx_agent_app.exe
+先检查 ZIP 的 SHA256 与同名 `.sha256` 文件一致，并检查清单版本及源码 commit。
+
+```powershell
+Get-FileHash .\dist\WXAgent-v1.1.0-windows-x64.zip -Algorithm SHA256
+.\dist\WXAgent-v1.1.0-windows-x64\backend\wxagent.exe version
+.\dist\WXAgent-v1.1.0-windows-x64\backend\wxagent.exe help
 ```
 
-## 配置文件
+CLI 版本输出应包含 `version: 1.1.0`、`platform: windows` 和 `arch: amd64`。GUI 文件版本应为 `1.1.0.2`。构建脚本检查每个 EXE/DLL 的直接依赖，并验证 Visual C++ 运行库已放在应用目录。
 
-`config.json` 包含以下配置项：
+使用独立临时目录和模拟 JSON 验收导入、重复导入、检索、筛选及导入失败回滚；不要对现有用户数据库试错。安装后验证新终端的 `wxagent version`、开始菜单、桌面快捷方式及“已安装的应用”条目，检查 GUI 与 CLI 指向同一份配置。升级验收须确认原数据库和用户配置保留。
 
-```json
-{
-  "export_dir": "./output",
-  "summary_output": "./output/summary_result.md",
-  "summary_history_dir": "./output/history",
-  "state_file": "./output/.wx_agent_state.json",
-  "wx_key_shared_prefs": "~/AppData/Roaming/com.example/wx_key/shared_preferences.json",
-  "wx_key_command": {
-    "path": "./modules/wx_key/wx_key.exe",
-    "cwd": "./modules/wx_key"
-  },
-  "echotrace_command": {
-    "path": "./modules/echotrace/echotrace.exe",
-    "cwd": "./modules/echotrace"
-  },
-  "llm": {
-    "base_url": "https://api.example.com/v1",
-    "api_key": "your-api-key",
-    "model": "gpt-4",
-    "temperature": 0.7,
-    "timeout": 120
-  }
-}
+## 安装与更新
+
+解压 ZIP 后双击 `Install.cmd`，或运行：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install_windows.ps1
 ```
 
-## 常见问题
+安装面向当前 Windows 用户，不需要管理员权限。安装器注册 CLI、桌面和开始菜单入口，并将程序与用户数据分开保存；更新保留已有配置和数据库。命令行注册完成后，重新打开终端。卸载入口位于 Windows“已安装的应用”，具体数据保留行为见安装说明。
 
-### Q: 启动时提示找不到 DLL
+`-ExecutionPolicy Bypass` 只作用于该脚本进程，不修改全局 PowerShell 策略。直接双击包内 `WXAgent.exe` 也可使用便携模式，此时数据路径以包内 `config.json` 为准。
 
-确保 `frontend/flutter_windows.dll` 和 `frontend/data/` 目录与 `frontend/wx_agent_app.exe` 在同一目录。
+## GitHub Release
 
-### Q: 后端无法启动
+完成源码与二进制验收后，给清单对应的 commit 创建 `v1.1.0` 标签，并上传 ZIP 和 SHA256 文件。发布说明应说明 CLI 优先、本地 SQLite 索引、安装方法和平台边界。历史 `v1.0.0` 的标签与资产保持不变。
 
-1. 检查端口 8000 是否被占用
-2. 检查 `config.json` 配置是否正确
-
-### Q: 前端显示 "连接失败"
-
-1. 确认后端已启动
-2. 检查前端配置的 API 地址是否正确 (默认 http://localhost:8000)
-
-## 发布清单
-
-发布前请确认：
-
-- [ ] 所有组件构建成功
-- [ ] 配置文件已正确设置
-- [ ] 测试启动器功能
-- [ ] 测试手动启动功能
-- [ ] 清理敏感信息（API Key 等）
-- [ ] 更新版本号
-
-## 版本历史
-
-- **v1.0.0** - 初始发布
+本构建脚本只生成包，不自动发布 GitHub Release、不安装到本机，也不会生成 macOS 安装包。macOS 当前支持通过 CLI 索引已有导出记录；原生微信采集能力另行适配。

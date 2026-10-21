@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -9,10 +10,66 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestInstalledConfigDiscovery(t *testing.T) {
+	root := t.TempDir()
+	versionDir := filepath.Join(root, "versions", "1.1.0")
+	if err := os.MkdirAll(versionDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := installedConfig(versionDir); got != "" || err != nil {
+		t.Fatalf("unmanaged bundle config = %q, %v", got, err)
+	}
+	dataRoot := t.TempDir()
+	marker := map[string]string{"product": "WXAgent", "install_root": root, "data_root": dataRoot}
+	writeMarker := func() {
+		t.Helper()
+		raw, _ := json.Marshal(marker)
+		if err := os.WriteFile(filepath.Join(root, "current.json"), raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeMarker()
+	got, err := installedConfig(versionDir)
+	if err != nil || got != filepath.Join(dataRoot, "config.json") {
+		t.Fatalf("installed config = %q, %v", got, err)
+	}
+	marker["install_root"] = dataRoot
+	writeMarker()
+	if _, err := installedConfig(versionDir); err == nil {
+		t.Fatal("accepted marker for another installation")
+	}
+	if got, err := installedConfig(root); err != nil || got != "" {
+		t.Fatalf("portable bundle unexpectedly uses installation config: %q, %v", got, err)
+	}
+}
+
+func TestBackendArgumentsUsesExplicitUserConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "user config.json")
+	if err := os.WriteFile(path, []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := backendArguments(options{port: 8123, configPath: path})
+	want := []string{"--config", path, "server", "--port=8123", "--host=127.0.0.1"}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("arguments = %v, %v; want %v", got, err, want)
+	}
+	if _, err := backendArguments(options{configPath: filepath.Dir(path)}); err == nil {
+		t.Fatal("directory accepted as configuration")
+	}
+	if _, err := backendArguments(options{configPath: path + ".missing"}); err == nil {
+		t.Fatal("missing configuration accepted")
+	}
+	got, err = backendArguments(options{port: 8000})
+	if err != nil || !reflect.DeepEqual(got, []string{"server", "--port=8000", "--host=127.0.0.1"}) {
+		t.Fatalf("portable arguments = %v, %v", got, err)
+	}
+}
 
 func TestPlatformCandidates(t *testing.T) {
 	for _, goos := range []string{"windows", "darwin", "linux"} {

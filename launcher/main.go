@@ -23,6 +23,7 @@ type options struct {
 	showConsole  bool
 	backendOnly  bool
 	frontendOnly bool
+	configPath   string
 }
 
 func main() {
@@ -31,6 +32,7 @@ func main() {
 	flag.BoolVar(&opts.showConsole, "console", false, "显示后端控制台")
 	flag.BoolVar(&opts.backendOnly, "backend-only", false, "仅启动后端")
 	flag.BoolVar(&opts.frontendOnly, "frontend-only", false, "仅启动前端")
+	flag.StringVar(&opts.configPath, "config", "", "用户配置文件路径")
 	flag.Parse()
 
 	exePath, err := os.Executable()
@@ -58,6 +60,13 @@ func run(ctx context.Context, baseDir string, opts options) error {
 	if err := opts.validate(); err != nil {
 		return err
 	}
+	if opts.configPath == "" {
+		var err error
+		opts.configPath, err = installedConfig(baseDir)
+		if err != nil {
+			return err
+		}
+	}
 	fmt.Printf("WXAgent · 工作目录: %s\n", baseDir)
 	backendURL := fmt.Sprintf("http://127.0.0.1:%d", opts.port)
 	var backend *childProcess
@@ -66,7 +75,11 @@ func run(ctx context.Context, baseDir string, opts options) error {
 		if err != nil {
 			return fmt.Errorf("未找到后端程序: %w", err)
 		}
-		cmd := exec.Command(path, "server", fmt.Sprintf("--port=%d", opts.port), "--host=127.0.0.1")
+		args, err := backendArguments(opts)
+		if err != nil {
+			return err
+		}
+		cmd := exec.Command(path, args...)
 		cmd.Dir = baseDir
 		cmd.Stderr = os.Stderr
 		if opts.showConsole {
@@ -123,6 +136,62 @@ func run(ctx context.Context, baseDir string, opts options) error {
 	case <-backendDone:
 		return fmt.Errorf("后端已退出: %v", backend.err)
 	}
+}
+
+// App Paths can launch an executable but cannot supply its arguments. Recognize
+// the installer's marker so that this entry point shares the same user database
+// as the shortcuts and CLI; portable bundles retain their local configuration.
+func installedConfig(baseDir string) (string, error) {
+	if filepath.Base(filepath.Dir(baseDir)) != "versions" {
+		return "", nil
+	}
+	root := filepath.Dir(filepath.Dir(baseDir))
+	raw, err := os.ReadFile(filepath.Join(root, "current.json"))
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("读取安装记录: %w", err)
+	}
+	var marker struct {
+		Product     string `json:"product"`
+		InstallRoot string `json:"install_root"`
+		DataRoot    string `json:"data_root"`
+	}
+	if err := json.Unmarshal(raw, &marker); err != nil {
+		return "", fmt.Errorf("解析安装记录: %w", err)
+	}
+	if marker.Product != "WXAgent" || !filepath.IsAbs(marker.InstallRoot) || !filepath.IsAbs(marker.DataRoot) {
+		return "", errors.New("无效的 WXAgent 安装记录")
+	}
+	rootInfo, err := os.Stat(root)
+	if err != nil {
+		return "", err
+	}
+	markerRootInfo, err := os.Stat(marker.InstallRoot)
+	if err != nil || !os.SameFile(rootInfo, markerRootInfo) {
+		return "", errors.New("WXAgent 安装记录与程序路径不一致")
+	}
+	return filepath.Join(marker.DataRoot, "config.json"), nil
+}
+
+func backendArguments(opts options) ([]string, error) {
+	args := []string{}
+	if opts.configPath != "" {
+		path, err := filepath.Abs(opts.configPath)
+		if err != nil {
+			return nil, fmt.Errorf("解析配置路径: %w", err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			return nil, fmt.Errorf("读取配置文件: %w", err)
+		}
+		if !info.Mode().IsRegular() {
+			return nil, errors.New("配置路径必须是文件")
+		}
+		args = append(args, "--config", path)
+	}
+	return append(args, "server", fmt.Sprintf("--port=%d", opts.port), "--host=127.0.0.1"), nil
 }
 
 type childProcess struct {

@@ -1,72 +1,105 @@
 # WXAgent
 
-本地聊天记录索引库，CLI 优先，GUI 可选。
+**本地聊天记录索引库 · CLI 优先 · GUI 可选**
 
-WXAgent 将已有聊天导出文件增量导入 SQLite，提供会话列表、原文检索、日期筛选和基础计数。记录保存在本机，命令行、桌面界面和本地 HTTP 接口使用同一个索引库。主应用不集成 AI 分析、AI 总结、提示词或模型服务配置。
+将聊天导出文件增量存入 SQLite，按会话、日期和关键词检索原文。CLI、桌面界面和本地 HTTP 接口共用一份数据库。记录保存在本机，不集成 AI 分析、AI 总结或模型服务。
 
-[快速开始](QUICKSTART.md) · [CLI 与数据约定](docs/CLI.md) · [开发与检查](docs/DEVELOPMENT.md) · [macOS](docs/MACOS.md) · [调用 Skill](skills/wxagent-index/SKILL.md)
+[下载 v1.1.0](https://github.com/angelo-xuang/WXAgent/releases/tag/v1.1.0) · [快速开始](QUICKSTART.md) · [CLI 文档](docs/CLI.md) · [Skill](skills/wxagent-index/SKILL.md) · [更新记录](CHANGELOG.md)
 
-## 核心流程
+## 下载与安装
+
+Windows 10/11 x64 下载 [WXAgent-v1.1.0-windows-x64.zip](https://github.com/angelo-xuang/WXAgent/releases/download/v1.1.0/WXAgent-v1.1.0-windows-x64.zip)，完整解压后双击 `Install.cmd`，或在解压目录打开 PowerShell：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install_windows.ps1
+```
+
+安装不需要管理员权限，也不需要安装 Go、Flutter 或数据库服务。安装后可从开始菜单或桌面的 **WXAgent** 打开界面。重新打开终端即可使用：
+
+```powershell
+wxagent version
+wxagent --export-dir "D:\聊天导出" import
+wxagent sessions
+wxagent messages --keyword "项目" --limit 50
+```
+
+| 位置 | 用途 |
+| --- | --- |
+| `%LOCALAPPDATA%\Programs\WXAgent\versions\1.1.0` | 当前版本程序 |
+| `%LOCALAPPDATA%\Programs\WXAgent\bin` | 注册到用户 PATH 的 CLI 入口 |
+| `%LOCALAPPDATA%\WXAgent\config.json` | 本机配置 |
+| `%LOCALAPPDATA%\WXAgent\data\wxagent.db` | 默认聊天索引数据库 |
+
+升级保留已有配置与数据。旧便携目录的记录不会被自动搬移；可用 `import` 显式导入原 JSON，或在设置中选择已有索引。卸载入口位于 Windows“已安装的应用”，卸载保留数据目录。
+
+也可不安装，直接在解压目录双击 `WXAgent.exe`，或执行 `.\backend\wxagent.exe --config .\config.json help`。便携模式的默认数据存放在解压目录，和安装模式分开。
+
+## 索引与归档
 
 ```text
-已有聊天 JSON ── import ── SQLite 索引库 ── CLI / 本地 HTTP / 可选 GUI
-      ↑
+聊天导出 JSON → 增量导入 → 本地 SQLite → CLI / GUI / HTTP
+       ↑
 Windows 微信采集（可选）
 ```
 
-- **增量入库**：记录源文件指纹，重复导入跳过未变化文件；更新记录并保留历史。
-- **原文查询**：按会话 ID、日期和关键词过滤，返回带发送者与时间的结构化消息。
-- **本地存储**：SQLite 单文件数据库，不要求安装数据库服务或 Flutter。
-- **脚本集成**：查询结果以 JSON 写入标准输出，错误写入标准错误，适合管道及 Skill 调用。
-- **轻量 GUI**：管理索引、浏览记录、筛选原文，Windows 原生微信采集作为辅助入口。
-- **数据完整性**：一次导入失败时事务回滚；源文件消失不会自动删除索引内的历史记录。
+- **增量导入**：用源文件指纹跳过未变文件，重复导入不会重复记账。
+- **保留历史**：源文件缩短或移走，不自动删除已入库记录。
+- **原文检索**：按稳定会话 ID、日期和正文关键词筛选，保留发送者及时间。
+- **完整分页**：CLI 默认返回全量，可显式指定 offset/limit；GUI 显示分页及匹配总数。
+- **失败回滚**：一批导入中的文件损坏时整批回滚，源 JSON 始终只读。
+- **脚本集成**：JSON 结果写入标准输出，错误和日志单独输出；可以交给其他工具处理。
 
-## 先用 CLI
+索引按文字匹配查询，不做语义推断。没有稳定消息 ID 的导出格式存在跨快照去重边界，详见 [数据约定](docs/CLI.md)。
 
-仅需要 Go 1.24 或兼容版本。在仓库根目录执行：
+## 桌面界面
+
+GUI 提供索引导入、原文检索、分页浏览及本机路径设置。微信采集作为辅助入口，不影响使用已有 JSON。
+
+![聊天记录检索界面（模拟数据）](docs/images/records.png)
+
+## 本地接口与 Skill
+
+```powershell
+wxagent serve --host 127.0.0.1 --port 8000
+```
+
+主要接口：`GET /sessions`、`GET /messages`、`GET /stats`、`GET /index/status` 和 `POST /index/import`。默认只监听本机，接口没有公网认证。
+
+[wxagent-index Skill](skills/wxagent-index/SKILL.md) 说明如何调用 CLI、读取完整分页和引用原文，可按所用助手的方式添加到技能目录。它不引入模型依赖，也不会自动触发微信采集。
+
+## 平台范围
+
+| 平台 | 索引与 CLI | GUI | 原始微信采集 |
+| --- | --- | --- | --- |
+| Windows x64 | 已有发布包 | 已有发布包 | 保留已有组件，需要匹配的本机微信环境 |
+| macOS | 可从源码构建，跨平台测试通过 | CI 检查构建，尚无安装包 | 待适配 |
+| Linux | 可从源码构建，跨平台测试通过 | 未提供发布包 | 待适配 |
+
+Mac 可先导入其他平台生成的 JSON。Mac 微信接入、应用签名和分发仍需单独验收，详见 [macOS 说明](docs/MACOS.md)。
+
+## 源码开发
+
+仅编译 CLI 需要 Go 1.24 或兼容版本：
 
 ```powershell
 cd backend
 go build -o wxagent.exe ./cmd/wxagent
 ./wxagent.exe --config config.local.json init
-./wxagent.exe --config config.local.json --export-dir "D:/聊天导出" import
-./wxagent.exe --config config.local.json sessions
-./wxagent.exe --config config.local.json messages --keyword "项目" --limit 50
+./wxagent.exe --config config.local.json --export-dir "D:\聊天导出" import
 ```
 
-macOS / Linux 将构建产物改为 `wxagent`，运行 `./wxagent`。CLI 的导入、SQLite 索引和查询使用同一套 Go 实现；无需启动 GUI 或 HTTP 服务。
-
-`init` 只创建新配置，不覆盖已有文件。默认数据库为配置目录下的 `data/wxagent.db`。已有配置中的旧模型字段不会生效，新配置不包含这些字段。
-
-## 可选界面与接口
-
-```powershell
-./wxagent.exe --config config.local.json serve --host 127.0.0.1 --port 8000
-```
-
-然后在另一个终端进入 `frontend/`，运行 `flutter pub get --enforce-lockfile` 和 `flutter run -d windows`。Mac 使用 `flutter run -d macos`。
-
-桌面界面通过本地 HTTP 连接索引库。默认监听 `127.0.0.1:8000`，接口没有公网认证，按本地工具使用。面向助手的 [Skill](skills/wxagent-index/SKILL.md) 只说明如何调用 CLI，不给应用增加模型依赖。
-
-## 源码结构
+macOS / Linux 将输出名改为 `wxagent`。GUI 使用 Flutter 3.35.7 / Dart 3.9.2。格式与测试：Windows 运行 `./scripts/dev.ps1 check`，其他平台运行 `bash scripts/dev.sh check`，仅检查 CLI 可追加 `go`。
 
 | 目录 | 用途 |
 | --- | --- |
-| `backend/cmd/wxagent/` | 主要 CLI 入口 |
-| `backend/internal/cli/` | 命令解析与 JSON 输出 |
-| `backend/internal/dataset/` | JSON 解析、SQLite 索引、查询 |
-| `backend/internal/server/` | GUI 使用的本地 HTTP 接口 |
-| `frontend/` | 可选 Flutter 桌面界面 |
-| `launcher/` | 桌面打包启动器 |
+| `backend/cmd/wxagent/` | CLI 入口 |
+| `backend/internal/dataset/` | JSON 解析、SQLite 索引与查询 |
+| `backend/internal/server/` | 本地 HTTP 接口 |
+| `frontend/` | Flutter GUI |
+| `launcher/` | 桌面进程启动及管理 |
+| `scripts/` | 构建、安装和质量检查 |
 | `skills/wxagent-index/` | 外部助手调用约定 |
-| `modules/` | 历史上游微信组件 |
 
-`backend/cmd/wxagent_backend/` 保留为兼容入口，运行相同的 CLI。发布目录和上游模块不参与批量格式化。
+更多信息见 [开发说明](docs/DEVELOPMENT.md) 与 [发布指南](docs/RELEASE_GUIDE.md)。`v1.0.0` 历史包继续保留；新版本已移除旧 AI 命令、接口和模型设置。
 
-## 平台与版本边界
-
-Windows 保留已有微信采集入口。macOS / Linux 可处理已导出的 JSON 并查询索引库；Mac 微信目录识别、密钥读取和原始数据库采集仍需单独适配。macOS GUI 工程由 CI 检查构建，尚未完成签名、安装包和实机采集验收。
-
-`main` 是当前源码主线，已有 `v1.0.0` Release 和安装包保留历史功能，本次源码改动不更新它们。新定位以本页及当前源码为准。
-
-个人配置使用 `*.local.json`。聊天 JSON、SQLite 索引、密钥和本机配置不要提交到 Git；导入不会修改源聊天导出文件。
+聊天数据、数据库、密钥与个人配置不提交到 Git。使用本人有权访问的记录；向外部助手提供数据时，由使用者决定处理范围。

@@ -1,5 +1,20 @@
 # 快速开始
 
+## 使用发布包（Windows）
+
+从 [v1.1.0 Release](https://github.com/angelo-xuang/WXAgent/releases/tag/v1.1.0) 下载 Windows x64 ZIP，完整解压后双击 `Install.cmd`。安装完成后，从开始菜单打开 WXAgent，或重新打开终端运行：
+
+```powershell
+wxagent version
+wxagent --export-dir "D:/聊天导出" import
+wxagent sessions
+wxagent messages --keyword "活动" --limit 50
+```
+
+安装版自动使用 `%LOCALAPPDATA%/WXAgent/config.json`，无需重复 `init`。程序、用户配置与数据库分开保存，升级和卸载保留用户数据。也可以不安装，在解压目录直接运行 `WXAgent.exe`；便携版和安装版的默认数据位置不同。
+
+下文说明从源码编译与更详细的操作。已安装用户可直接用 `wxagent` 替换示例中的 `./wxagent.exe --config config.local.json`。
+
 ## 1. 编译命令行工具
 
 只使用索引库时需要 Go 1.24 或兼容版本，不需要 Flutter。

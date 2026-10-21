@@ -89,13 +89,13 @@ BEGIN
     BEGIN
         BLOCK "040904e4"
         BEGIN
-            VALUE "CompanyName", "com.example" "\0"
-            VALUE "FileDescription", "wx_agent_app" "\0"
+            VALUE "CompanyName", "WXAgent" "\0"
+            VALUE "FileDescription", "WXAgent" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
             VALUE "InternalName", "wx_agent_app" "\0"
-            VALUE "LegalCopyright", "Copyright (C) 2025 com.example. All rights reserved." "\0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 WXAgent contributors" "\0"
             VALUE "OriginalFilename", "wx_agent_app.exe" "\0"
-            VALUE "ProductName", "wx_agent_app" "\0"
+            VALUE "ProductName", "WXAgent" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END
