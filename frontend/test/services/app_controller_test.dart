@@ -209,6 +209,32 @@ void main() {
     },
   );
 
+  test('locator skips root launcher and discovers backend CLI', () async {
+    final root = await Directory.systemTemp.createTemp('wxagent-cli-locator-');
+    final previous = Directory.current;
+    final launcher = await File(
+      '${root.path}${Platform.pathSeparator}${Platform.isWindows ? 'WXAgent.exe' : 'wxagent'}',
+    ).writeAsString('GUI launcher fixture');
+    final backend = await Directory(
+      '${root.path}${Platform.pathSeparator}backend',
+    ).create();
+    final cli = File(
+      '${backend.path}${Platform.pathSeparator}${Platform.isWindows ? 'wxagent.exe' : 'wxagent'}',
+    );
+    addTearDown(() async {
+      Directory.current = previous;
+      if (await cli.exists()) await cli.delete();
+      await launcher.delete();
+      await backend.delete();
+      await root.delete();
+    });
+    Directory.current = root;
+    final runtime = DirectoryRuntime({});
+    expect(await runtime.locateExecutable(), isNull);
+    await cli.writeAsString('CLI fixture');
+    expect((await runtime.locateExecutable())?.path, cli.path);
+  });
+
   test(
     'package-root config is found when the executable is in backend',
     () async {

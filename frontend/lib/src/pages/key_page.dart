@@ -36,14 +36,7 @@ class _KeyAcquisitionPageState extends State<KeyAcquisitionPage> {
     });
     try {
       final status = await widget.controller.api.getStatus();
-      final keyData =
-          (status['key'] as Map?)?.cast<String, dynamic>() ?? const {};
       _safeSetState(() {
-        _keyInfo = KeyInfo.fromJson({
-          'db_key': keyData['db_key'],
-          'timestamp': keyData['timestamp'],
-          'raw': keyData,
-        });
         _nativeWechat =
             (status['capabilities'] as Map?)?['native_wechat'] as bool? ??
             (defaultTargetPlatform == TargetPlatform.windows);
@@ -101,12 +94,12 @@ class _KeyAcquisitionPageState extends State<KeyAcquisitionPage> {
   @override
   Widget build(BuildContext context) {
     return PageContainer(
-      title: '密钥获取',
-      subtitle: 'WXAgent 通过注入方式本地读取微信数据库密钥，仅在你的设备上使用，不上传网络。',
+      title: '连接微信',
+      subtitle: '微信采集的辅助入口。已导出 JSON 文件的索引和查询不需要此步骤。',
       children: [
         SectionCard(
           title: '密钥读取说明',
-          subtitle: '确保微信处于登录状态并打开桌面客户端，点击下方按钮即可自动注入与读取密钥。',
+          subtitle: '确保微信桌面客户端已登录，点击下方按钮读取本地数据库密钥。',
           actions: [
             TextButton.icon(
               onPressed: _statusLoading ? null : _loadStatus,
@@ -123,9 +116,7 @@ class _KeyAcquisitionPageState extends State<KeyAcquisitionPage> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text(
-                '· WXAgent 会自动写入 shared_preferences.json，并解析出数据库密钥及图片密钥。',
-              ),
+              const Text('连接信息用于本地读取微信记录。也可直接前往“微信采集”，一次完成连接和导出。'),
               if (!_nativeWechat) ...[
                 const SizedBox(height: 8),
                 const Text('当前后端不支持本地密钥读取。可连接 Windows 后端，或使用已导出的聊天记录。'),
@@ -188,11 +179,7 @@ class _KeyAcquisitionPageState extends State<KeyAcquisitionPage> {
               Wrap(
                 spacing: 16,
                 runSpacing: 12,
-                children: [
-                  _buildKeyTag('图片 XOR Key', _keyInfo?.imageXorKey?.toString()),
-                  _buildKeyTag('图片 AES Key', _keyInfo?.imageAesKey),
-                  _buildKeyTag('原始记录条目', '${_keyInfo?.raw.length ?? 0}'),
-                ],
+                children: [_buildKeyTag('读取时间', _keyInfo?.timestamp)],
               ),
             ],
           ),

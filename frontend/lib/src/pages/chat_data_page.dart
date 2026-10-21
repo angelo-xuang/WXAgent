@@ -1,671 +1,312 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
+import 'package:provider/provider.dart';
 
 import '../app.dart';
+import '../services/wx_agent_api.dart';
+import '../theme.dart';
 import '../widgets/page_container.dart';
 import '../widgets/section_card.dart';
 
 class ChatDataPage extends StatefulWidget {
   const ChatDataPage({super.key, required this.controller});
-
   final AppController controller;
-
   @override
   State<ChatDataPage> createState() => _ChatDataPageState();
 }
 
 class _ChatDataPageState extends State<ChatDataPage> {
-  final TextEditingController _wechatPathCtrl = TextEditingController();
-  final TextEditingController _exportDirCtrl = TextEditingController();
-
-  bool _loading = false;
-  bool _actionLoading = false;
-  bool _detectingPath = false;
-  bool _autoDetectTried = false;
+  final _wechatPath = TextEditingController();
+  final _exportDir = TextEditingController();
+  bool _loading = true;
+  bool _running = false;
+  bool _native = false;
   String? _error;
-  Map<String, dynamic>? _statusExport;
-  bool _fullRefreshRunning = false;
-  bool _nativeWechat = Platform.isWindows;
-  Map<String, dynamic>? _lastFullRefresh;
-  DateTime? _lastFullRefreshAt;
-  List<String>? _refreshLogs;
-  final ScrollController _refreshLogCtrl = ScrollController();
-  bool _refreshUserScrolling = false;
+  String? _message;
+  final _logs = <String>[];
+  Map<String, dynamic>? _result;
+  StreamSubscription<StreamEvent>? _subscription;
+  int _runId = 0;
 
-  bool get _canDetectLocalData =>
-      Platform.isWindows &&
-      _nativeWechat &&
-      const [
-        '127.0.0.1',
-        'localhost',
-        '::1',
-      ].contains(Uri.tryParse(widget.controller.baseUrl)?.host);
+  int _seenRevision = 0;
+
+  @override
+  void didUpdateWidget(covariant ChatDataPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (_seenRevision != widget.controller.dataRevision) {
+      _seenRevision = widget.controller.dataRevision;
+      _load();
+    }
+  }
 
   @override
   void initState() {
     super.initState();
-    _loadData();
+    _seenRevision = widget.controller.dataRevision;
+    _load();
   }
 
   @override
   void dispose() {
-    _wechatPathCtrl.dispose();
-    _exportDirCtrl.dispose();
-    _refreshLogCtrl.dispose();
+    _runId++;
+    unawaited(_subscription?.cancel());
+    _wechatPath.dispose();
+    _exportDir.dispose();
     super.dispose();
   }
 
-  Future<void> _loadData() async {
-    _safeSetState(() {
+  Future<void> _load() async {
+    setState(() {
       _loading = true;
       _error = null;
     });
     try {
-      final configResp = await widget.controller.api.fetchConfig();
-      final config =
-          (configResp['data'] as Map?)?.cast<String, dynamic>() ?? const {};
-      final status = await widget.controller.api.getStatus();
-      final detectedWechatPath = config['wechat_data_path'] as String? ?? '';
-      final detectedExportDir = config['export_dir'] as String? ?? '';
-      _safeSetState(() {
-        _wechatPathCtrl.text = detectedWechatPath;
-        _exportDirCtrl.text = detectedExportDir;
-        _statusExport = (status['export'] as Map?)?.cast<String, dynamic>();
-        final capabilities = status['capabilities'] as Map?;
-        _nativeWechat =
-            capabilities?['native_wechat'] as bool? ?? Platform.isWindows;
-      });
-      if (mounted &&
-          _canDetectLocalData &&
-          detectedWechatPath.isEmpty &&
-          !_autoDetectTried) {
-        _autoDetectTried = true;
-        unawaited(_autoDetectWechatPath());
-      }
-    } catch (err) {
-      _safeSetState(() {
-        _error = err.toString();
-      });
-    } finally {
-      _safeSetState(() {
-        _loading = false;
-      });
-    }
-  }
-
-  Future<void> _selectDirectory({
-    required String label,
-    required TextEditingController controller,
-    required String field,
-  }) async {
-    final path = await getDirectoryPath(confirmButtonText: '选择 $label');
-    if (!mounted || path == null) return;
-    await _updateConfig(field, path);
-    if (mounted && _error == null) controller.text = path;
-  }
-
-  Future<void> _autoDetectWechatPath() async {
-    if (!mounted || !_canDetectLocalData || _detectingPath) return;
-    _safeSetState(() {
-      _detectingPath = true;
-      _error = null;
-    });
-    try {
-      final homeDir =
-          Platform.environment['USERPROFILE'] ??
-          Platform.environment['HOME'] ??
-          '';
-      if (homeDir.isEmpty) {
-        throw Exception('无法确定当前用户目录');
-      }
-      final sep = Platform.pathSeparator;
-      final candidates = [
-        '$homeDir${sep}xwechat_files',
-        '$homeDir${sep}Documents${sep}xwechat_files',
-        '$homeDir${sep}WeChat Files',
-        '$homeDir${sep}Documents${sep}WeChat Files',
-        '$homeDir${sep}AppData${sep}Local${sep}WeChat${sep}WeChat Files',
-      ];
-      for (final base in candidates) {
-        final dir = Directory(base);
-        if (!await dir.exists()) continue;
-        await for (final entity in dir.list()) {
-          if (entity is! Directory) continue;
-          final dbStorage = Directory('${entity.path}${sep}db_storage');
-          if (await dbStorage.exists()) {
-            if (!mounted) return;
-            await widget.controller.api.updateConfig({
-              'wechat_data_path': base,
-            });
-            _safeSetState(() {
-              _wechatPathCtrl.text = base;
-            });
-            if (mounted) {
-              ScaffoldMessenger.of(
-                context,
-              ).showSnackBar(SnackBar(content: Text('已检测到微信数据目录：$base')));
-            }
-            return;
-          }
-        }
-      }
-      _safeSetState(() {
-        _error = '未找到微信数据目录，请手动选择。';
-      });
-    } catch (err) {
-      _safeSetState(() {
-        _error = '自动检测失败：$err';
-      });
-    } finally {
-      _safeSetState(() {
-        _detectingPath = false;
-      });
-    }
-  }
-
-  Future<void> _updateConfig(String field, String value) async {
-    _safeSetState(() {
-      _actionLoading = true;
-      _error = null;
-    });
-    try {
-      await widget.controller.api.updateConfig({field: value});
+      final api = widget.controller.api;
+      final values = await Future.wait([api.fetchConfig(), api.getStatus()]);
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('目录设置已更新')));
-    } catch (err) {
-      _safeSetState(() {
-        _error = err.toString();
+      final config = values[0]['data'] as Map? ?? {};
+      setState(() {
+        _wechatPath.text = config['wechat_data_path']?.toString() ?? '';
+        _exportDir.text = config['export_dir']?.toString() ?? '';
+        _native = (values[1]['capabilities'] as Map?)?['native_wechat'] == true;
+        if (values[1]['index_error'] != null) {
+          _error = '索引库读取失败：${values[1]['index_error']}';
+        }
       });
+    } catch (error) {
+      if (mounted) setState(() => _error = error.toString());
     } finally {
-      _safeSetState(() {
-        _actionLoading = false;
-      });
+      if (mounted) setState(() => _loading = false);
     }
   }
 
-  Future<void> _runFullRefresh() async {
-    if (_fullRefreshRunning) return;
-    _safeSetState(() {
-      _fullRefreshRunning = true;
+  Future<void> _browse(TextEditingController target) async {
+    final path = await getDirectoryPath(confirmButtonText: '选择目录');
+    if (mounted && path != null) target.text = path;
+  }
+
+  Future<void> _save() async {
+    setState(() {
+      _loading = true;
       _error = null;
-      _refreshLogs = [];
+      _message = null;
     });
     try {
-      await for (final event in widget.controller.api.runFullRefreshStream(
-        autoLaunchKey: true,
-        waitSeconds: 90,
-        pollInterval: 3,
-      )) {
-        if (!mounted) return;
-        if (event.type == 'log') {
-          _safeSetState(() {
-            _refreshLogs?.add(event.content);
-          });
-          _scrollRefreshLogs();
-        } else if (event.type == 'error') {
-          _safeSetState(() {
-            _error = event.content.isNotEmpty
-                ? event.content
-                : event.payload?['message']?.toString();
-          });
-          return;
-        } else if (event.type == 'result') {
-          final payload = event.payload ?? const {};
-          _safeSetState(() {
-            _lastFullRefresh = payload;
-            _lastFullRefreshAt = DateTime.now();
-            final logs = payload['logs'] as List?;
-            if ((_refreshLogs == null || _refreshLogs!.isEmpty) &&
-                logs != null) {
-              _refreshLogs = logs.map((e) => e.toString()).toList();
-            }
-          });
-        }
-      }
-      if (!mounted) return;
-      final processed =
-          _lastFullRefresh?['messages'] ?? _lastFullRefresh?['sessions'] ?? 0;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('导出完成，处理 $processed 条记录')));
-      await _loadData();
-    } catch (err) {
-      _safeSetState(() {
-        _error = err.toString();
+      await widget.controller.api.updateConfig({
+        'wechat_data_path': _wechatPath.text.trim(),
+        'export_dir': _exportDir.text.trim(),
       });
+      if (mounted) setState(() => _message = '采集目录已保存。');
+    } catch (error) {
+      if (mounted) setState(() => _error = error.toString());
     } finally {
-      _safeSetState(() {
-        _fullRefreshRunning = false;
-      });
+      if (mounted) setState(() => _loading = false);
     }
   }
 
-  void _scrollRefreshLogs() {
-    if (_refreshUserScrolling) return;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && _refreshLogCtrl.hasClients) {
-        _refreshLogCtrl.animateTo(
-          _refreshLogCtrl.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 120),
-          curve: Curves.easeOut,
+  Future<void> _run() async {
+    if (_running) return;
+    final runId = ++_runId;
+    await _subscription?.cancel();
+    if (!mounted || runId != _runId) return;
+    await _save();
+    if (!mounted || _error != null) return;
+    setState(() {
+      _running = true;
+      _result = null;
+      _message = null;
+      _logs.clear();
+    });
+    _subscription = widget.controller.api
+        .runFullRefreshStream(autoLaunchKey: true)
+        .listen(
+          (event) {
+            if (!mounted || runId != _runId) return;
+            setState(() {
+              if (event.type == 'log') _logs.add(event.content);
+              if (event.type == 'error') {
+                _error = event.content.isNotEmpty
+                    ? event.content
+                    : '采集失败，请查看日志。';
+                _running = false;
+              }
+              if (event.type == 'result') {
+                _result = event.payload ?? {};
+                _running = false;
+              }
+            });
+            if (event.type == 'result') {
+              _seenRevision = widget.controller.dataRevision + 1;
+              widget.controller.notifyDataChanged();
+            }
+          },
+          onError: (Object error) {
+            if (mounted && runId == _runId) {
+              setState(() {
+                _error = error.toString();
+                _running = false;
+              });
+            }
+          },
+          onDone: () {
+            if (mounted && runId == _runId) setState(() => _running = false);
+          },
         );
-      }
-    });
   }
 
-  void _safeSetState(VoidCallback fn) {
-    if (!mounted) return;
-    setState(fn);
-  }
-
-  Widget _buildRefreshSummary() {
-    final result = _lastFullRefresh ?? const {};
-    final key = (result['key'] as Map?)?.cast<String, dynamic>();
-    final keyError = result['key_error'] as String?;
-    final exportOk = result['export'] == true;
-    final datasetReady = result['dataset_ready'] == true;
-    final sessions = result['sessions'] ?? 0;
-    final messages = result['messages'] ?? 0;
-    final ranAt = _lastFullRefreshAt == null
-        ? null
-        : DateFormat('yyyy-MM-dd HH:mm:ss').format(_lastFullRefreshAt!);
-    final metrics = [
-      _MetricItem(
-        '密钥',
-        key != null
-            ? '已更新'
-            : keyError != null
-            ? '失败'
-            : '未更新',
-      ),
-      _MetricItem('导出', exportOk ? '成功' : '失败'),
-      _MetricItem('数据集', datasetReady ? '可用' : '未生成'),
-      _MetricItem('会话数', '$sessions'),
-      _MetricItem('消息数', '$messages'),
-    ];
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Colors.grey.shade50,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.grey.shade200),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            ranAt == null ? '最近运行结果' : '最近运行结果（$ranAt）',
-            style: const TextStyle(fontWeight: FontWeight.w600),
-          ),
-          const SizedBox(height: 12),
-          Wrap(
-            spacing: 12,
-            runSpacing: 10,
-            children: metrics.map((item) => _MetricChip(item: item)).toList(),
-          ),
-          if (key != null && key['timestamp'] != null) ...[
-            const SizedBox(height: 12),
-            Text('密钥时间：${key['timestamp']}'),
-          ],
-          if (keyError != null && key == null) ...[
-            const SizedBox(height: 12),
-            Text(
-              '密钥错误：$keyError',
-              style: const TextStyle(color: Colors.redAccent),
+  @override
+  Widget build(BuildContext context) {
+    final local = const [
+      '127.0.0.1',
+      'localhost',
+      '::1',
+    ].contains(Uri.tryParse(widget.controller.baseUrl)?.host);
+    return PageContainer(
+      title: '微信采集',
+      subtitle: 'Windows 后端可读取微信本地记录，导出 JSON 并自动导入索引库。已有文件可直接前往“索引库”导入。',
+      children: [
+        SectionCard(
+          title: '采集目录',
+          subtitle: '填写后端电脑上的路径。微信数据目录可从微信设置中的存储位置找到。',
+          actions: [
+            TextButton.icon(
+              onPressed: _loading || _running ? null : _load,
+              icon: const Icon(Icons.refresh_rounded),
+              label: const Text('重新读取'),
             ),
           ],
-          if (_refreshLogs != null && _refreshLogs!.isNotEmpty) ...[
-            const SizedBox(height: 12),
-            ExpansionTile(
-              tilePadding: EdgeInsets.zero,
-              title: Row(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (_loading) const LinearProgressIndicator(),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _wechatPath,
+                enabled: !_loading && !_running,
+                decoration: InputDecoration(
+                  labelText: '微信数据目录',
+                  suffixIcon: local
+                      ? IconButton(
+                          tooltip: '选择微信目录',
+                          onPressed: _loading || _running
+                              ? null
+                              : () => _browse(_wechatPath),
+                          icon: const Icon(Icons.folder_open_rounded),
+                        )
+                      : null,
+                ),
+              ),
+              const SizedBox(height: 18),
+              TextField(
+                controller: _exportDir,
+                enabled: !_loading && !_running,
+                decoration: InputDecoration(
+                  labelText: 'JSON 导出目录',
+                  suffixIcon: local
+                      ? IconButton(
+                          tooltip: '选择导出目录',
+                          onPressed: _loading || _running
+                              ? null
+                              : () => _browse(_exportDir),
+                          icon: const Icon(Icons.folder_open_rounded),
+                        )
+                      : null,
+                ),
+              ),
+              const SizedBox(height: 18),
+              OutlinedButton.icon(
+                onPressed: _loading || _running ? null : _save,
+                icon: const Icon(Icons.save_outlined),
+                label: const Text('保存目录'),
+              ),
+              if (_message != null) ...[
+                const SizedBox(height: 12),
+                Text(
+                  _message!,
+                  style: const TextStyle(color: WxAgentColors.success),
+                ),
+              ],
+            ],
+          ),
+        ),
+        SectionCard(
+          title: '采集并建立索引',
+          subtitle: '请确保微信已登录。执行时会连接微信、导出记录，然后更新本地数据库。',
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (!_native && !_loading) ...[
+                const Text(
+                  '当前后端不支持本地微信采集。可连接 Windows 后端，或导入已有的 JSON 文件。',
+                  style: TextStyle(height: 1.7),
+                ),
+                const SizedBox(height: 16),
+              ],
+              Wrap(
+                spacing: 12,
+                runSpacing: 10,
                 children: [
-                  const Icon(Icons.terminal, size: 18),
-                  const SizedBox(width: 8),
-                  Text('导出日志（${_refreshLogs!.length}）'),
+                  ElevatedButton.icon(
+                    onPressed: _loading || _running || !_native ? null : _run,
+                    icon: const Icon(Icons.download_rounded),
+                    label: Text(_running ? '正在采集…' : '采集并更新索引'),
+                  ),
+                  TextButton.icon(
+                    onPressed: () => context.read<NavigationController>().goTo(
+                      WxAgentPage.library,
+                    ),
+                    icon: const Icon(Icons.storage_rounded),
+                    label: const Text('查看索引库'),
+                  ),
                 ],
               ),
-              children: [
+              if (_error != null) ...[
+                const SizedBox(height: 16),
+                SelectableText(
+                  _error!,
+                  style: const TextStyle(color: WxAgentColors.danger),
+                ),
+              ],
+              if (_result != null) ...[
+                const SizedBox(height: 18),
+                Text(
+                  '采集完成。索引库现有 ${_result!['messages'] ?? 0} 条记录、${_result!['sessions'] ?? 0} 个会话。',
+                  style: const TextStyle(
+                    color: WxAgentColors.success,
+                    height: 1.7,
+                  ),
+                ),
+              ],
+              if (_logs.isNotEmpty || _running) ...[
+                const SizedBox(height: 18),
+                if (_running) const LinearProgressIndicator(),
+                const SizedBox(height: 8),
                 Container(
                   width: double.infinity,
-                  constraints: const BoxConstraints(maxHeight: 220),
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 4,
+                  constraints: const BoxConstraints(maxHeight: 280),
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: WxAgentColors.background,
+                    borderRadius: BorderRadius.circular(10),
                   ),
                   child: SingleChildScrollView(
                     child: SelectableText(
-                      _refreshLogs!.join('\n'),
+                      _logs.isEmpty ? '正在连接微信…' : _logs.join('\n'),
                       style: const TextStyle(
                         fontFamily: 'monospace',
                         fontSize: 12,
+                        height: 1.6,
                       ),
                     ),
                   ),
                 ),
               ],
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final export = _statusExport;
-    return PageContainer(
-      title: '聊天记录读取与导出',
-      subtitle: '设置微信数据路径并执行增量/全量导出，导出结果将保存为 JSON 供后续分析与总结使用。',
-      children: [
-        SectionCard(
-          title: '聊天数据源配置',
-          subtitle:
-              '指向微信本地数据目录和导出目录，WXAgent 会根据路径直接读取数据库。如果自动检测微信数据路径失败，请根据微信设置中的xwechat_files路径手动选择。如C:\\Users\\用户名\\xwechat_files。',
-          actions: [
-            TextButton.icon(
-              onPressed: _loading ? null : _loadData,
-              icon: _loading
-                  ? const SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.refresh),
-              label: const Text('刷新状态'),
-            ),
-          ],
-          child: Column(
-            children: [
-              _PathField(
-                label: '微信数据路径',
-                controller: _wechatPathCtrl,
-                onBrowse: () => _selectDirectory(
-                  label: '微信数据路径',
-                  controller: _wechatPathCtrl,
-                  field: 'wechat_data_path',
-                ),
-              ),
-              const SizedBox(height: 8),
-              Align(
-                alignment: Alignment.centerLeft,
-                child: TextButton.icon(
-                  onPressed: _actionLoading || !_canDetectLocalData
-                      ? null
-                      : _autoDetectWechatPath,
-                  icon: const Icon(Icons.auto_fix_high_rounded),
-                  label: const Text('自动检测'),
-                ),
-              ),
-              const SizedBox(height: 16),
-              _PathField(
-                label: '聊天导出目录',
-                controller: _exportDirCtrl,
-                onBrowse: () => _selectDirectory(
-                  label: '导出目录',
-                  controller: _exportDirCtrl,
-                  field: 'export_dir',
-                ),
-              ),
-              const SizedBox(height: 20),
-              if (export != null) _ExportMetrics(export: export),
-              if (_error != null) ...[
-                const SizedBox(height: 12),
-                Text(_error!, style: const TextStyle(color: Colors.redAccent)),
-              ],
-              const SizedBox(height: 12),
-              Text(
-                '导出操作请在下方“聊天记录导出”中完成，执行完毕后点击“刷新状态”同步结果。',
-                style: TextStyle(color: Colors.grey.shade600),
-              ),
-            ],
-          ),
-        ),
-        SectionCard(
-          title: '聊天记录导出',
-          subtitle: '执行解密并导出聊天记录为 JSON 文件，全过程本地执行',
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Wrap(
-                spacing: 12,
-                runSpacing: 8,
-                children: [
-                  ElevatedButton.icon(
-                    onPressed: _fullRefreshRunning || !_nativeWechat
-                        ? null
-                        : _runFullRefresh,
-                    icon: _fullRefreshRunning
-                        ? const SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              valueColor: AlwaysStoppedAnimation(Colors.white),
-                            ),
-                          )
-                        : const Icon(Icons.play_arrow_rounded),
-                    label: const Text('一键解密 + 导出'),
-                  ),
-                ],
-              ),
-              if (!_nativeWechat) ...[
-                const SizedBox(height: 12),
-                const Text('当前后端不支持本地微信解密导出，可继续分析和总结已导出的聊天记录。'),
-              ],
-              if (_fullRefreshRunning ||
-                  (_refreshLogs != null && _refreshLogs!.isNotEmpty)) ...[
-                const SizedBox(height: 12),
-                Container(
-                  decoration: BoxDecoration(
-                    color: Colors.grey.shade900,
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: Colors.grey.shade700),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 8,
-                        ),
-                        decoration: BoxDecoration(
-                          color: Colors.grey.shade800,
-                          borderRadius: const BorderRadius.only(
-                            topLeft: Radius.circular(7),
-                            topRight: Radius.circular(7),
-                          ),
-                        ),
-                        child: Row(
-                          children: [
-                            if (_fullRefreshRunning) ...[
-                              const SizedBox(
-                                width: 12,
-                                height: 12,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: Colors.green,
-                                ),
-                              ),
-                              const SizedBox(width: 8),
-                            ] else ...[
-                              const Icon(
-                                Icons.check_circle,
-                                size: 14,
-                                color: Colors.green,
-                              ),
-                              const SizedBox(width: 8),
-                            ],
-                            Text(
-                              _fullRefreshRunning ? '导出进行中...' : '导出完成',
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontWeight: FontWeight.w500,
-                                fontSize: 13,
-                              ),
-                            ),
-                            const Spacer(),
-                            if (!_fullRefreshRunning &&
-                                (_refreshLogs?.isNotEmpty ?? false))
-                              IconButton(
-                                icon: const Icon(
-                                  Icons.clear,
-                                  size: 16,
-                                  color: Colors.grey,
-                                ),
-                                padding: EdgeInsets.zero,
-                                constraints: const BoxConstraints(),
-                                tooltip: '清除日志',
-                                onPressed: () {
-                                  _safeSetState(() {
-                                    _refreshLogs = [];
-                                  });
-                                },
-                              ),
-                          ],
-                        ),
-                      ),
-                      SizedBox(
-                        height: 200,
-                        child: NotificationListener<ScrollNotification>(
-                          onNotification: (notification) {
-                            if (notification is ScrollStartNotification &&
-                                notification.dragDetails != null) {
-                              _refreshUserScrolling = true;
-                            } else if (notification is ScrollEndNotification) {
-                              _refreshUserScrolling = false;
-                              _scrollRefreshLogs();
-                            }
-                            return false;
-                          },
-                          child: ListView(
-                            controller: _refreshLogCtrl,
-                            padding: const EdgeInsets.all(12),
-                            children: [
-                              SelectableText(
-                                (_refreshLogs ?? []).join('\n'),
-                                style: const TextStyle(
-                                  fontFamily: 'monospace',
-                                  fontSize: 12,
-                                  color: Colors.grey,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-              if (_lastFullRefresh != null) ...[
-                const SizedBox(height: 16),
-                _buildRefreshSummary(),
-              ],
             ],
           ),
         ),
       ],
-    );
-  }
-}
-
-class _PathField extends StatelessWidget {
-  const _PathField({
-    required this.label,
-    required this.controller,
-    required this.onBrowse,
-  });
-
-  final String label;
-  final TextEditingController controller;
-  final VoidCallback onBrowse;
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.center,
-      children: [
-        Expanded(
-          child: TextField(
-            controller: controller,
-            readOnly: true,
-            decoration: InputDecoration(labelText: label),
-          ),
-        ),
-        const SizedBox(width: 12),
-        OutlinedButton.icon(
-          onPressed: onBrowse,
-          icon: const Icon(Icons.folder_open),
-          label: const Text('选择'),
-        ),
-      ],
-    );
-  }
-}
-
-class _ExportMetrics extends StatelessWidget {
-  const _ExportMetrics({required this.export});
-
-  final Map<String, dynamic> export;
-
-  @override
-  Widget build(BuildContext context) {
-    final items = [
-      _MetricItem('导出目录', export['export_dir'] as String? ?? '--'),
-      _MetricItem('会话数', '${export['sessions'] ?? 0}'),
-      _MetricItem('消息数', '${export['messages'] ?? 0}'),
-      _MetricItem('最近导出', export['last_export_time'] as String? ?? '--'),
-    ];
-    return Padding(
-      padding: const EdgeInsets.only(top: 12),
-      child: Wrap(
-        spacing: 16,
-        runSpacing: 12,
-        children: items.map((item) => _MetricChip(item: item)).toList(),
-      ),
-    );
-  }
-}
-
-class _MetricItem {
-  const _MetricItem(this.label, this.value);
-  final String label;
-  final String value;
-}
-
-class _MetricChip extends StatelessWidget {
-  const _MetricChip({required this.item});
-
-  final _MetricItem item;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      decoration: BoxDecoration(
-        color: Colors.grey.shade100,
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            item.label,
-            style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
-          ),
-          const SizedBox(height: 6),
-          Text(item.value, style: const TextStyle(fontWeight: FontWeight.w600)),
-        ],
-      ),
     );
   }
 }

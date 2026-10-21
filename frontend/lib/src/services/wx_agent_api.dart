@@ -30,7 +30,7 @@ class StreamEvent {
     );
   }
 
-  final String type; // log, ai_chunk, progress, done, error, result
+  final String type; // log, progress, done, error, result
   final String content;
   final int? step;
   final int? total;
@@ -72,16 +72,6 @@ class WxAgentApiClient {
 
   Future<List<SessionMeta>> listSessions() async {
     final response = await get('/sessions');
-    final list = response['data'] as List? ?? const [];
-    return list
-        .map(
-          (item) => SessionMeta.fromJson((item as Map).cast<String, dynamic>()),
-        )
-        .toList();
-  }
-
-  Future<List<SessionMeta>> listExportStates() async {
-    final response = await get('/export/states');
     final list = response['data'] as List? ?? const [];
     return list
         .map(
@@ -135,125 +125,36 @@ class WxAgentApiClient {
     return _streamEvents('/full-refresh/stream', body);
   }
 
-  Future<AnalysisResult> analyzeSessions({
+  Future<Map<String, dynamic>> indexStatus() => get('/index/status');
+
+  Future<Map<String, dynamic>> importIndex({String? exportDir}) => post(
+    '/index/import',
+    body: {
+      if (exportDir != null && exportDir.trim().isNotEmpty)
+        'export_dir': exportDir.trim(),
+    },
+  );
+
+  Future<MessagePage> queryMessages({
+    String? sessionId,
     String? startDate,
     String? endDate,
-    int topN = 10,
-    List<String>? sessionTypes,
-  }) async {
-    final response = await post(
-      '/analysis/sessions',
-      body: {
+    String? keyword,
+    int offset = 0,
+    int limit = 50,
+  }) async => MessagePage.fromJson(
+    await get(
+      '/messages',
+      query: {
+        'session_id': sessionId,
         'start_date': startDate,
         'end_date': endDate,
-        'top_n': topN,
-        'session_types': sessionTypes,
+        'keyword': keyword,
+        'offset': offset,
+        'limit': limit,
       },
-    );
-    return AnalysisResult.fromJson(response);
-  }
-
-  Future<SummaryRunResult> runSummary({
-    String? startDate,
-    String? endDate,
-    bool incremental = true,
-    List<String>? questions,
-    bool saveMarkdown = true,
-    String? summaryPrompt,
-    List<String>? sessions,
-    String mode = 'merged', // 默认使用跨会话合并模式
-    int? maxTokens,
-    String? chunkPrompt,
-    String? finalPrompt,
-  }) async {
-    final sanitizedQuestions = questions
-        ?.map((q) => q.trim())
-        .where((q) => q.isNotEmpty)
-        .toList();
-    final sanitizedSessions = sessions
-        ?.map((s) => s.trim())
-        .where((s) => s.isNotEmpty)
-        .toList();
-    final body = <String, dynamic>{
-      'start_date': startDate,
-      'end_date': endDate,
-      'incremental': incremental,
-      'save_markdown': saveMarkdown,
-      'summary_prompt': summaryPrompt,
-      'mode': mode,
-    };
-    if (maxTokens != null) {
-      body['max_tokens'] = maxTokens;
-    }
-    if (sanitizedQuestions != null && sanitizedQuestions.isNotEmpty) {
-      body['questions'] = sanitizedQuestions;
-    }
-    if (sanitizedSessions != null && sanitizedSessions.isNotEmpty) {
-      body['sessions'] = sanitizedSessions;
-    }
-    if (chunkPrompt != null && chunkPrompt.trim().isNotEmpty) {
-      body['chunk_prompt'] = chunkPrompt.trim();
-    }
-    if (finalPrompt != null && finalPrompt.trim().isNotEmpty) {
-      body['final_prompt'] = finalPrompt.trim();
-    }
-    final response = await post('/summary/run', body: body);
-    return SummaryRunResult.fromJson(response);
-  }
-
-  /// 流式运行总结，返回事件流
-  Stream<StreamEvent> runSummaryStream({
-    String? startDate,
-    String? endDate,
-    List<String>? sessions,
-    int? maxTokens,
-    String? chunkPrompt,
-    String? finalPrompt,
-  }) {
-    final sanitizedSessions = sessions
-        ?.map((s) => s.trim())
-        .where((s) => s.isNotEmpty)
-        .toList();
-    final body = <String, dynamic>{
-      'start_date': startDate,
-      'end_date': endDate,
-      'mode': 'merged',
-    };
-    if (maxTokens != null) {
-      body['max_tokens'] = maxTokens;
-    }
-    if (sanitizedSessions != null && sanitizedSessions.isNotEmpty) {
-      body['sessions'] = sanitizedSessions;
-    }
-    if (chunkPrompt != null && chunkPrompt.trim().isNotEmpty) {
-      body['chunk_prompt'] = chunkPrompt.trim();
-    }
-    if (finalPrompt != null && finalPrompt.trim().isNotEmpty) {
-      body['final_prompt'] = finalPrompt.trim();
-    }
-
-    return _streamEvents('/summary/run-stream', body);
-  }
-
-  Future<List<SummaryHistoryEntry>> listSummaryHistory({int? limit}) async {
-    final response = await get('/summary/history', query: {'limit': limit});
-    final list = response['data'] as List? ?? const [];
-    return list
-        .map(
-          (item) => SummaryHistoryEntry.fromJson(
-            (item as Map).cast<String, dynamic>(),
-          ),
-        )
-        .toList();
-  }
-
-  Future<String> readSummaryHistory(String path) async {
-    final response = await get(
-      '/summary/history/content',
-      query: {'path': path},
-    );
-    return response['content'] as String? ?? '';
-  }
+    ),
+  );
 
   Future<Map<String, dynamic>> fetchConfig() => get('/config');
 
@@ -263,55 +164,6 @@ class WxAgentApiClient {
   Future<Map<String, dynamic>> reloadConfig() => post('/config/reload');
 
   Future<Map<String, dynamic>> getStatus() => get('/status');
-
-  Future<Map<String, dynamic>> describeSession({
-    required String file,
-    String? startDate,
-    String? endDate,
-  }) => post(
-    '/sessions/describe',
-    body: {'file': file, 'start_date': startDate, 'end_date': endDate},
-  );
-
-  Future<Map<String, dynamic>> exportFiltered({
-    List<String>? selected,
-    List<String>? files,
-    String? startDate,
-    String? endDate,
-    String? outputDir,
-    bool singleFile = false,
-  }) => post(
-    '/summary/export',
-    body: {
-      'selected': selected,
-      'files': files,
-      'start_date': startDate,
-      'end_date': endDate,
-      'output_dir': outputDir,
-      'single_file': singleFile,
-    },
-  );
-
-  Future<Map<String, dynamic>> testLlm({
-    String? baseUrl,
-    String? model,
-    String? apiKey,
-  }) {
-    final payload = <String, dynamic>{};
-
-    void put(String key, String? value) {
-      final trimmed = value?.trim();
-      if (trimmed != null && trimmed.isNotEmpty) {
-        payload[key] = trimmed;
-      }
-    }
-
-    put('base_url', baseUrl);
-    put('model', model);
-    put('api_key', apiKey);
-
-    return post('/llm/test', body: payload.isEmpty ? null : payload);
-  }
 
   Uri _uri(String path, [Map<String, dynamic>? query]) {
     final normalizedBase = baseUrl.endsWith('/')

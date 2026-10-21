@@ -1,43 +1,73 @@
-# WXAgent 源码快速开始
+# 快速开始
 
-当前完整微信接入流程面向 Windows。macOS 已有界面工程与平台边界，实际可用范围见 [macOS 开发说明](docs/MACOS.md)。本页命令用于源码开发，不生成或更新发布安装包。
+## 1. 编译命令行工具
 
-## 1. 准备环境
+只使用索引库时需要 Go 1.24 或兼容版本，不需要 Flutter。
 
-安装 Flutter 3.35.7（Dart 3.9.2）、Go 1.24.x，以及 Visual Studio 的 C++ 桌面开发组件。将 Flutter 与 Go 加入 PATH。
-
-在仓库根目录运行：
-
-```powershell
-./scripts/dev.ps1 check
-```
-
-该命令安装锁定的前端依赖并执行格式、静态分析和测试。格式需要调整时，运行 `./scripts/dev.ps1 format`。
-
-## 2. 使用独立的本机配置
-
-从仓库根目录执行：
-
-```powershell
-if (!(Test-Path backend/config.local.json)) {
-    Copy-Item backend/config.json backend/config.local.json
-}
-```
-
-编辑 `backend/config.local.json`，填写本机路径和模型服务配置。相对路径以配置文件所在目录为基准。该文件已被 Git 忽略；不要把 API Key、数据库密钥或聊天数据提交到仓库。
-
-首次接入需要现有 Windows 微信组件；从源码编译主应用不会自动构建上游 `modules/` 中的所有原生组件。仅检查界面和已有导出记录时，可以先单独运行主服务。
-
-## 3. 启动服务与界面
-
-第一个终端：
+Windows，在仓库根目录执行：
 
 ```powershell
 cd backend
-go run ./cmd/wxagent_backend --config config.local.json server --host 127.0.0.1 --port 8000
+go build -o wxagent.exe ./cmd/wxagent
+./wxagent.exe help
+./wxagent.exe --config config.local.json init
 ```
 
-第二个终端，从仓库根目录执行：
+macOS / Linux：
+
+```bash
+cd backend
+go build -o wxagent ./cmd/wxagent
+./wxagent help
+./wxagent --config config.local.json init
+```
+
+后续示例用 Windows 名称；其他系统替换为 `./wxagent`。帮助与版本命令不依赖配置文件。`init` 遇到已存在的配置会报错并保留原内容。
+
+## 2. 导入已有聊天记录
+
+支持 WXAgent / EchoTrace 的会话 JSON。将 `--export-dir` 指向导出目录；如果其下存在包含 JSON 的 `chat_history/`，优先读取该目录。
+
+```powershell
+./wxagent.exe --config config.local.json --export-dir "D:/聊天导出" import
+./wxagent.exe --config config.local.json status
+```
+
+导入结果显示扫描文件、变化文件和库内记录数量。重复执行只处理变化文件。导入和查询均不修改原 JSON。
+
+默认数据库是配置文件旁的 `data/wxagent.db`。也可以直接指定独立数据库：
+
+```powershell
+./wxagent.exe --database "D:/聊天索引/records.db" --export-dir "D:/聊天导出" import
+./wxagent.exe --database "D:/聊天索引/records.db" sessions
+```
+
+查询时始终使用同一个配置或 `--database` 路径。命令行传入的路径以当前工作目录为基准；配置内路径以配置文件所在目录为基准。
+
+## 3. 查询原文
+
+```powershell
+./wxagent.exe --config config.local.json sessions
+./wxagent.exe --config config.local.json messages --keyword "活动" --start-date 2026-10-01 --end-date 2026-10-22 --limit 50
+./wxagent.exe --config config.local.json messages --session "群聊ID@chatroom" --offset 50 --limit 50
+./wxagent.exe --config config.local.json stats
+```
+
+会话 ID 从 `sessions` 返回值中获取。日期按 UTC+8 计算，起止日期均包含整天。`messages` 返回 `messages` 和匹配总量 `total`。默认 `--limit 0` 返回全部；需要分页时显式传入 `--limit` 和 `--offset`。
+
+查询结果是 JSON，可重定向为文件或交给其他工具读取。详见 [CLI 与数据约定](docs/CLI.md)。
+
+## 4. 可选 GUI
+
+需要 Flutter 3.35.7（Dart 3.9.2）及对应系统桌面构建工具链。
+
+在后端目录启动本地服务：
+
+```powershell
+./wxagent.exe --config config.local.json serve
+```
+
+第二个终端，从仓库根目录启动前端：
 
 ```powershell
 cd frontend
@@ -45,26 +75,28 @@ flutter pub get --enforce-lockfile
 flutter run -d windows
 ```
 
-后端默认只监听本机。界面通过 `http://127.0.0.1:8000` 连接；其他地址可在启动前设置环境变量 `WXAGENT_BACKEND_URL`。由启动器启动时，该地址会自动传给界面。
+macOS 改为 `flutter run -d macos`。默认服务地址为 `http://127.0.0.1:8000`。也可通过 `WXAGENT_BACKEND_URL` 指定地址；界面设置提供连接入口。
 
-直接从界面自动启动已编译后端时，可设置 `WX_AGENT_BACKEND_EXE` 指向后端程序、`WX_AGENT_CONFIG` 指向本机配置。未设置配置变量时，会依次查找后端程序所在目录与上一级目录的 `config.json`。
+GUI 可查看索引状态、导入 JSON、筛选和分页浏览记录。配置中的目录是后端所在机器的路径。Windows 微信采集需要已有原生组件；已有 JSON 的索引和查询不需要这些组件。
 
-## 4. 使用流程
+## 5. 可选 Windows 微信采集
 
-1. **连接微信**：准备本人有权访问的数据及所需组件。
-2. **聊天数据**：选择本地数据路径与导出目录，执行导出。
-3. **数据分析**：查看已有导出记录的统计、日期范围和会话分布。
-4. **设置**：配置模型服务地址、模型名称与 API Key。
-5. **AI 总结**：选择会话及日期，生成并查看总结。
+在本机配置中设置 `wechat_data_path`、`wx_key_shared_prefs` 及必要的原生组件路径，然后：
 
-读取、导出与统计在本地执行。AI 总结会将所选聊天内容发送给配置的模型服务商。
+```powershell
+./wxagent.exe --config config.local.json refresh-key
+./wxagent.exe --config config.local.json export
+```
 
-## 常见问题
+`export` 从微信原始数据库采集到 JSON，成功后自动入库；`import` 用于单独导入已有 JSON。`refresh-key --ensure` 可启动已配置的 Windows 密钥工具。CLI 构建不会自动构建上游组件。
 
-- **连接失败**：先检查后端终端是否正常启动，再确认端口与界面地址一致。自动启动后端需要可执行文件及其配置；开发时建议分别启动。
-- **没有聊天数据**：检查配置中的 `export_dir` 是否指向实际导出目录，勿误把微信数据库目录作为 JSON 导出目录。
-- **AI 返回错误或超时**：检查模型配置、服务额度及网络。流中断会显示失败，不会当作成功；可在修复后重新运行。
-- **旧状态首次总结重复处理**：新代码将导出与总结进度分开，首次会建立独立总结进度，避免漏掉此前仅导出的内容。
-- **Mac 无法获取密钥**：原生微信接入尚未完成，当前应先调试界面、后端连接及已导出数据的处理。
+## 排查
 
-详细的开发命令、测试范围与 CI 说明见 [源码开发与质量检查](docs/DEVELOPMENT.md)。
+- **索引为空**：先运行 `import`，检查数据库路径是否一致。只读查询不会自动导入。
+- **JSON 格式错误**：错误会带文件位置；修正来源或选择正确目录后重试。整个导入事务回滚，已有索引保留。
+- **重复导入数量不变**：未变更文件被跳过属于正常行为。
+- **连接失败**：确认服务已启动，界面地址和端口一致。可先用 CLI `status` 检查索引。
+- **Mac 无法采集微信**：该平台目前使用已有 JSON 入库，原始微信接入仍待适配。
+- **旧 AI 命令不可用**：主线源码已移除这些命令和 HTTP 接口，历史报告文件保留在原位置。
+
+源码检查见 [开发说明](docs/DEVELOPMENT.md)。本流程不生成或修改 GitHub Release。

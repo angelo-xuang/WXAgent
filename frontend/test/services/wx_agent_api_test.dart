@@ -15,35 +15,28 @@ class StreamingClient extends http.BaseClient {
 }
 
 void main() {
-  for (final summary in [true, false]) {
-    test(
-      '${summary ? 'summary' : 'refresh'} parses split UTF-8, CRLF and multiline SSE',
-      () async {
-        final bytes = utf8.encode(
-          ': heartbeat\r\nevent:log\r\ndata:{"content":\r\ndata: "你好", "step": 1}\r\n\r\nevent: result\ndata: {"content":"完成"}',
-        );
-        final client = WxAgentApiClient(
-          baseUrl: 'http://test.invalid',
-          httpClient: StreamingClient((request) async {
-            expect(request.headers['Accept'], 'text/event-stream');
-            return http.StreamedResponse(
-              Stream.fromIterable(bytes.map((byte) => [byte])),
-              200,
-            );
-          }),
-        );
-        addTearDown(client.dispose);
-        final events =
-            await (summary
-                    ? client.runSummaryStream()
-                    : client.runFullRefreshStream())
-                .toList();
-        expect(events.map((event) => event.type), ['log', 'result']);
-        expect(events.first.content, '你好');
-        expect(events.first.step, 1);
-        expect(events.last.content, '完成');
-      },
-    );
+  {
+    test('refresh parses split UTF-8, CRLF and multiline SSE', () async {
+      final bytes = utf8.encode(
+        ': heartbeat\r\nevent:log\r\ndata:{"content":\r\ndata: "你好", "step": 1}\r\n\r\nevent: result\ndata: {"content":"完成"}',
+      );
+      final client = WxAgentApiClient(
+        baseUrl: 'http://test.invalid',
+        httpClient: StreamingClient((request) async {
+          expect(request.headers['Accept'], 'text/event-stream');
+          return http.StreamedResponse(
+            Stream.fromIterable(bytes.map((byte) => [byte])),
+            200,
+          );
+        }),
+      );
+      addTearDown(client.dispose);
+      final events = await client.runFullRefreshStream().toList();
+      expect(events.map((event) => event.type), ['log', 'result']);
+      expect(events.first.content, '你好');
+      expect(events.first.step, 1);
+      expect(events.last.content, '完成');
+    });
   }
 
   test(
@@ -60,7 +53,7 @@ void main() {
       );
       addTearDown(client.dispose);
       await expectLater(
-        client.runSummaryStream(),
+        client.runFullRefreshStream(),
         emitsError(isA<FormatException>()),
       );
     },
@@ -82,7 +75,7 @@ void main() {
       );
       addTearDown(client.dispose);
       await expectLater(
-        client.runSummaryStream(),
+        client.runFullRefreshStream(),
         emitsInOrder([
           isA<StreamEvent>(),
           emitsError(isA<FormatException>()),
@@ -92,35 +85,30 @@ void main() {
     },
   );
 
-  for (final summary in [true, false]) {
-    test(
-      '${summary ? 'summary' : 'refresh'} done without result remains incomplete',
-      () async {
-        final client = WxAgentApiClient(
-          baseUrl: 'http://test.invalid',
-          httpClient: StreamingClient(
-            (_) async => http.StreamedResponse(
-              Stream.value(
-                utf8.encode('event: done\ndata: {"content":"生成结束"}\n\n'),
-              ),
-              200,
+  {
+    test('refresh done without result remains incomplete', () async {
+      final client = WxAgentApiClient(
+        baseUrl: 'http://test.invalid',
+        httpClient: StreamingClient(
+          (_) async => http.StreamedResponse(
+            Stream.value(
+              utf8.encode('event: done\ndata: {"content":"导出结束"}\n\n'),
             ),
+            200,
           ),
-        );
-        addTearDown(client.dispose);
-        final stream = summary
-            ? client.runSummaryStream()
-            : client.runFullRefreshStream();
-        await expectLater(
-          stream,
-          emitsInOrder([
-            isA<StreamEvent>().having((event) => event.type, 'type', 'done'),
-            emitsError(isA<FormatException>()),
-            emitsDone,
-          ]),
-        );
-      },
-    );
+        ),
+      );
+      addTearDown(client.dispose);
+      final stream = client.runFullRefreshStream();
+      await expectLater(
+        stream,
+        emitsInOrder([
+          isA<StreamEvent>().having((event) => event.type, 'type', 'done'),
+          emitsError(isA<FormatException>()),
+          emitsDone,
+        ]),
+      );
+    });
   }
 
   test('done followed by result completes successfully', () async {
@@ -130,7 +118,7 @@ void main() {
         (_) async => http.StreamedResponse(
           Stream.value(
             utf8.encode(
-              'event: done\ndata: {}\n\nevent: result\ndata: {"content":"最终总结"}\n\n',
+              'event: done\ndata: {}\n\nevent: result\ndata: {"content":"采集完成"}\n\n',
             ),
           ),
           200,
@@ -138,9 +126,9 @@ void main() {
       ),
     );
     addTearDown(client.dispose);
-    final events = await client.runSummaryStream().toList();
+    final events = await client.runFullRefreshStream().toList();
     expect(events.map((event) => event.type), ['done', 'result']);
-    expect(events.last.content, '最终总结');
+    expect(events.last.content, '采集完成');
   });
 
   test(
@@ -156,7 +144,7 @@ void main() {
         }),
       );
       addTearDown(client.dispose);
-      final subscription = client.runSummaryStream().listen((_) {});
+      final subscription = client.runFullRefreshStream().listen((_) {});
       final request = await sent.future;
       await subscription.cancel();
       await request.abortTrigger;
@@ -181,7 +169,7 @@ void main() {
         }),
       );
       addTearDown(client.dispose);
-      final subscription = client.runSummaryStream().listen(
+      final subscription = client.runFullRefreshStream().listen(
         (_) => first.complete(),
       );
       bytes.add(utf8.encode('event: log\ndata: {"content":"开始"}\n\n'));
@@ -206,7 +194,7 @@ void main() {
     );
     addTearDown(client.dispose);
     await expectLater(
-      client.runSummaryStream(),
+      client.runFullRefreshStream(),
       emitsError(isA<TimeoutException>()),
     );
     await sent.abortTrigger;
@@ -278,7 +266,7 @@ void main() {
         return response.future;
       }),
     );
-    final subscription = client.runSummaryStream().listen((_) {});
+    final subscription = client.runFullRefreshStream().listen((_) {});
     final request = await sent.future;
     client.dispose();
     await request.abortTrigger;

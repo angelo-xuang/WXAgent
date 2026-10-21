@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -25,6 +26,7 @@ import (
 
 // ExportConfig 瀵煎嚭閰嶇疆
 type ExportConfig struct {
+	LogWriter     io.Writer    // Progress only; default stderr keeps CLI stdout machine-readable.
 	WeChatDataDir string       // 寰俊鏁版嵁鐩綍
 	DBKey         string       // 鏁版嵁搴撳瘑閽?
 	OutputDir     string       // 杈撳嚭鐩綍
@@ -109,9 +111,9 @@ func (e *Exporter) Export() error {
 	// 1. 获取当前用户的 wxid（用于判断 is_sender）
 	selfWxid := e.getSelfWxid()
 	if selfWxid != "" {
-		fmt.Printf("✓ Self wxid: %s\n", selfWxid)
+		fmt.Fprintf(e.logWriter(), "✓ Self wxid: %s\n", selfWxid)
 	} else {
-		fmt.Println("⚠️ Could not determine self wxid, is_sender will always be 0")
+		fmt.Fprintln(e.logWriter(), "⚠️ Could not determine self wxid, is_sender will always be 0")
 	}
 
 	// 2. 鏌ユ壘鎵€鏈?message_*.db 鏂囦欢
@@ -149,82 +151,82 @@ func (e *Exporter) Export() error {
 		return fmt.Errorf("no message database files found in %s", messageDBDir)
 	}
 
-	fmt.Printf("Found %d message database file(s)\n", len(messageDBs))
+	fmt.Fprintf(e.logWriter(), "Found %d message database file(s)\n", len(messageDBs))
 
 	// 2. 澶勭悊姣忎釜鏁版嵁搴撴枃浠?
 	allSessions := make(map[string]bool)
 	wxidCache := make(map[string]string) // Msg_<md5(wxid)> -> wxid cache
 	contactNames := e.loadContactNames()
 	if len(contactNames) > 0 {
-		fmt.Printf("Loaded %d contact display names\n", len(contactNames))
+		fmt.Fprintf(e.logWriter(), "Loaded %d contact display names\n", len(contactNames))
 	} else {
-		fmt.Println("Loaded 0 contact display names (will fall back to wxid)")
+		fmt.Fprintln(e.logWriter(), "Loaded 0 contact display names (will fall back to wxid)")
 	}
 
 	for _, dbPath := range messageDBs {
-		fmt.Printf("\nProcessing: %s\n", filepath.Base(dbPath))
+		fmt.Fprintf(e.logWriter(), "\nProcessing: %s\n", filepath.Base(dbPath))
 
 		// 瑙ｅ瘑鏁版嵁搴?
 		tempDBPath := filepath.Join(os.TempDir(), fmt.Sprintf("wxagent_decrypted_%s_%d.db",
 			filepath.Base(dbPath), time.Now().Unix()))
 		defer os.Remove(tempDBPath)
 
-		fmt.Println("  Decrypting...")
+		fmt.Fprintln(e.logWriter(), "  Decrypting...")
 		decryptor := decrypt.NewV4Decryptor()
 		ctx := context.Background()
 
 		if err := decryptor.DecryptToFile(ctx, dbPath, e.config.DBKey, tempDBPath); err != nil {
-			fmt.Printf("  [!] Failed to decrypt: %v\n", err)
+			fmt.Fprintf(e.logWriter(), "  [!] Failed to decrypt: %v\n", err)
 			continue
 		}
 
-		fmt.Println("  鉁?Decrypted")
+		fmt.Fprintln(e.logWriter(), "  鉁?Decrypted")
 
 		// 鎵撳紑瑙ｅ瘑鍚庣殑鏁版嵁搴?
 		db, err := sql.Open("sqlite", tempDBPath)
 		if err != nil {
-			fmt.Printf("  [!] Failed to open: %v\n", err)
+			fmt.Fprintf(e.logWriter(), "  [!] Failed to open: %v\n", err)
 			continue
 		}
 
 		// 构建 Msg_<md5(wxid)> -> wxid 映射并累积
-		fmt.Println("  Building wxid mapping...")
+		fmt.Fprintln(e.logWriter(), "  Building wxid mapping...")
 		wxidMap, err := e.buildWxidMap(db)
 		if err != nil {
-			fmt.Printf("  [!] Failed to build wxid map: %v\n", err)
+			fmt.Fprintf(e.logWriter(), "  [!] Failed to build wxid map: %v\n", err)
 		} else {
 			for table, wxid := range wxidMap {
 				if _, exists := wxidCache[table]; !exists {
 					wxidCache[table] = wxid
 				}
 			}
-			fmt.Printf("  [+] Mapped %d sessions (total %d)\n", len(wxidMap), len(wxidCache))
+			fmt.Fprintf(e.logWriter(), "  [+] Mapped %d sessions (total %d)\n", len(wxidMap), len(wxidCache))
 		}
 
 		// 鍒楀嚭鎵€鏈夎〃
 		tables, err := e.listTables(db)
 		if err != nil {
 			db.Close()
-			fmt.Printf("  [!] Failed to list tables: %v\n", err)
+			fmt.Fprintf(e.logWriter(), "  [!] Failed to list tables: %v\n", err)
 			continue
 		}
-		fmt.Printf("  Tables: %v\n", tables)
+		fmt.Fprintf(e.logWriter(), "  Tables: %v\n", tables)
 
 		// 鏌ヨ浼氳瘽鍒楄〃
 		sessions, err := e.getSessions(db)
 		if err != nil {
 			db.Close()
-			fmt.Printf("  [!] Failed to get sessions: %v\n", err)
+			fmt.Fprintf(e.logWriter(), "  [!] Failed to get sessions: %v\n", err)
 			continue
 		}
 
-		fmt.Printf("  Found %d sessions\n", len(sessions))
+		fmt.Fprintf(e.logWriter(), "  Found %d sessions\n", len(sessions))
 
 		// 导出会话 - 注意：同一会话的消息可能分布在多个数据库文件中
 		// 不再跳过已见过的会话，而是合并来自不同数据库的消息
 		for _, sessionID := range sessions {
 			if err := e.exportSession(db, sessionID, wxidCache, contactNames, selfWxid); err != nil {
-				fmt.Printf("  [!] Failed to export %s: %v\n", sessionID, err)
+				fmt.Fprintf(e.logWriter(), "  [!] Failed to export %s: %v\n", sessionID, err)
 				continue
 			}
 			allSessions[sessionID] = true
@@ -233,14 +235,14 @@ func (e *Exporter) Export() error {
 		db.Close()
 	}
 
-	fmt.Printf("\n[OK] Exported %d unique sessions\n", len(allSessions))
+	fmt.Fprintf(e.logWriter(), "\n[OK] Exported %d unique sessions\n", len(allSessions))
 
 	// 保存状态（用于增量导出）
 	if e.config.Incremental && e.config.StateStore != nil {
 		if err := e.config.StateStore.Save(); err != nil {
-			fmt.Printf("⚠️ Failed to save export state: %v\n", err)
+			fmt.Fprintf(e.logWriter(), "⚠️ Failed to save export state: %v\n", err)
 		} else {
-			fmt.Println("✓ Export state saved")
+			fmt.Fprintln(e.logWriter(), "✓ Export state saved")
 		}
 	}
 
@@ -291,7 +293,7 @@ func (e *Exporter) exportSession(db *sql.DB, tableName string, wxidMap map[strin
 	if selfWxid != "" {
 		row := db.QueryRow("SELECT rowid FROM Name2Id WHERE user_name = ?", selfWxid)
 		if err := row.Scan(&myRowid); err == nil {
-			fmt.Printf("  [DEBUG] 当前用户 %s 在 Name2Id 中的 rowid: %d\n", selfWxid, myRowid)
+			fmt.Fprintf(e.logWriter(), "  [DEBUG] 当前用户 %s 在 Name2Id 中的 rowid: %d\n", selfWxid, myRowid)
 		}
 	}
 
@@ -315,7 +317,7 @@ func (e *Exporter) exportSession(db *sql.DB, tableName string, wxidMap map[strin
 	if e.config.Incremental && e.config.StateStore != nil {
 		lastTimestamp = e.config.StateStore.LastTimestamp(sessionID)
 		if lastTimestamp > 0 {
-			fmt.Printf("  [Incremental] Session %s: last timestamp %d\n", sessionID, lastTimestamp)
+			fmt.Fprintf(e.logWriter(), "  [Incremental] Session %s: last timestamp %d\n", sessionID, lastTimestamp)
 		}
 	}
 
@@ -472,7 +474,7 @@ func (e *Exporter) exportSession(db *sql.DB, tableName string, wxidMap map[strin
 	if len(messages) == 0 {
 		// 没有新消息
 		if lastTimestamp > 0 {
-			fmt.Printf("  [OK] %s: No new messages (incremental)\n", sessionID)
+			fmt.Fprintf(e.logWriter(), "  [OK] %s: No new messages (incremental)\n", sessionID)
 		}
 		return nil
 	}
@@ -513,7 +515,7 @@ func (e *Exporter) exportSession(db *sql.DB, tableName string, wxidMap map[strin
 		})
 		messages = allMessages
 
-		fmt.Printf("  [MERGE] %s: %d existing + %d new = %d total\n",
+		fmt.Fprintf(e.logWriter(), "  [MERGE] %s: %d existing + %d new = %d total\n",
 			sessionID, len(existingSession.Messages), len(newMessages), len(messages))
 	}
 
@@ -536,7 +538,7 @@ func (e *Exporter) exportSession(db *sql.DB, tableName string, wxidMap map[strin
 		e.config.StateStore.UpdateSession(sessionID, maxTimestamp, len(messages))
 	}
 
-	fmt.Printf("  [OK] Exported %s: %d messages\n", sessionID, len(messages))
+	fmt.Fprintf(e.logWriter(), "  [OK] Exported %s: %d messages\n", sessionID, len(messages))
 	return nil
 }
 
@@ -736,7 +738,7 @@ func (e *Exporter) getSelfWxid() string {
 
 	entries, err := os.ReadDir(accountDBDir)
 	if err != nil {
-		fmt.Printf("[DEBUG getSelfWxid] Failed to read account dir: %v, trying fallback method\n", err)
+		fmt.Fprintf(e.logWriter(), "[DEBUG getSelfWxid] Failed to read account dir: %v, trying fallback method\n", err)
 		// 不要直接返回,继续尝试方法2
 	} else {
 		// account 目录存在,尝试读取数据库
@@ -752,13 +754,13 @@ func (e *Exporter) getSelfWxid() string {
 			decryptor := decrypt.NewV4Decryptor()
 			ctx := context.Background()
 			if err := decryptor.DecryptToFile(ctx, dbPath, e.config.DBKey, tempPath); err != nil {
-				fmt.Printf("[DEBUG getSelfWxid] Failed to decrypt %s: %v\n", entry.Name(), err)
+				fmt.Fprintf(e.logWriter(), "[DEBUG getSelfWxid] Failed to decrypt %s: %v\n", entry.Name(), err)
 				continue
 			}
 
 			db, err := sql.Open("sqlite", tempPath)
 			if err != nil {
-				fmt.Printf("[DEBUG getSelfWxid] Failed to open decrypted db: %v\n", err)
+				fmt.Fprintf(e.logWriter(), "[DEBUG getSelfWxid] Failed to open decrypted db: %v\n", err)
 				continue
 			}
 
@@ -768,17 +770,17 @@ func (e *Exporter) getSelfWxid() string {
 			db.Close()
 
 			if err == nil && wxid != "" {
-				fmt.Printf("[DEBUG getSelfWxid] Found wxid from account db: %s\n", wxid)
+				fmt.Fprintf(e.logWriter(), "[DEBUG getSelfWxid] Found wxid from account db: %s\n", wxid)
 				return wxid
 			} else if err != nil {
-				fmt.Printf("[DEBUG getSelfWxid] Query failed: %v\n", err)
+				fmt.Fprintf(e.logWriter(), "[DEBUG getSelfWxid] Query failed: %v\n", err)
 			}
 		}
 	}
 
 	// 方法2: 从数据目录名推断（通常格式为 wxid_xxx 或 wxid_xxx_yyy）
 	dirName := filepath.Base(e.config.WeChatDataDir)
-	fmt.Printf("[DEBUG getSelfWxid] Trying to extract wxid from directory name: %s\n", dirName)
+	fmt.Fprintf(e.logWriter(), "[DEBUG getSelfWxid] Trying to extract wxid from directory name: %s\n", dirName)
 
 	// 移除可能的后缀（如 _937e）
 	if strings.HasPrefix(dirName, "wxid_") {
@@ -791,17 +793,17 @@ func (e *Exporter) getSelfWxid() string {
 			if len(lastPart) <= 6 && !strings.Contains(lastPart, "22") {
 				// 去掉最后一部分(通常是随机后缀)
 				wxid := strings.Join(parts[:len(parts)-1], "_")
-				fmt.Printf("[DEBUG getSelfWxid] Using wxid from directory name (trimmed suffix): %s\n", wxid)
+				fmt.Fprintf(e.logWriter(), "[DEBUG getSelfWxid] Using wxid from directory name (trimmed suffix): %s\n", wxid)
 				return wxid
 			} else {
 				// 保留完整目录名作为 wxid
-				fmt.Printf("[DEBUG getSelfWxid] Using full directory name as wxid: %s\n", dirName)
+				fmt.Fprintf(e.logWriter(), "[DEBUG getSelfWxid] Using full directory name as wxid: %s\n", dirName)
 				return dirName
 			}
 		}
 	}
 
-	fmt.Printf("[DEBUG getSelfWxid] Failed to determine wxid\n")
+	fmt.Fprintf(e.logWriter(), "[DEBUG getSelfWxid] Failed to determine wxid\n")
 	return ""
 }
 
@@ -1323,4 +1325,11 @@ func (e *Exporter) cleanTextContent(content string) string {
 	}
 
 	return strings.TrimSpace(content)
+}
+
+func (e *Exporter) logWriter() io.Writer {
+	if e.config.LogWriter != nil {
+		return e.config.LogWriter
+	}
+	return os.Stderr
 }

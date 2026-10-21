@@ -16,6 +16,16 @@ import (
 
 func TestPlatformCandidates(t *testing.T) {
 	for _, goos := range []string{"windows", "darwin", "linux"} {
+		backends := backendCandidates("bundle", goos)
+		if backends[0] != filepath.Join("bundle", "backend", executableName("wxagent", goos)) {
+			t.Fatalf("CLI is not the preferred backend: %v", backends)
+		}
+		// A root wxagent.exe would be the WXAgent.exe launcher itself on Windows.
+		for _, path := range backends {
+			if strings.EqualFold(path, filepath.Join("bundle", "WXAgent.exe")) {
+				t.Fatal("backend lookup can recursively launch the desktop launcher")
+			}
+		}
 		paths := append(backendCandidates("bundle", goos), frontendCandidates("bundle", goos)...)
 		foundApp := false
 		for _, path := range paths {

@@ -1,196 +1,183 @@
 import 'package:flutter/material.dart';
 
 import '../app.dart';
+import '../theme.dart';
 import '../widgets/page_container.dart';
 import '../widgets/section_card.dart';
 
 class SettingsPage extends StatefulWidget {
   const SettingsPage({super.key, required this.controller});
-
   final AppController controller;
-
   @override
   State<SettingsPage> createState() => _SettingsPageState();
 }
 
 class _SettingsPageState extends State<SettingsPage> {
-  final TextEditingController _llmBaseCtrl = TextEditingController();
-  final TextEditingController _llmModelCtrl = TextEditingController();
-  final TextEditingController _llmKeyCtrl = TextEditingController();
-
-  static const double _fixedTemperature = 0.7;
-  bool _loading = false;
-  bool _savingLlm = false;
-  String? _configPath;
+  final _address = TextEditingController();
+  final _database = TextEditingController();
+  final _export = TextEditingController();
+  bool _loading = true;
+  bool _saving = false;
+  String? _error;
   String? _message;
 
   @override
   void initState() {
     super.initState();
-    _loadConfig();
+    _address.text = widget.controller.baseUrl;
+    _load();
   }
 
   @override
   void dispose() {
-    _llmBaseCtrl.dispose();
-    _llmModelCtrl.dispose();
-    _llmKeyCtrl.dispose();
+    _address.dispose();
+    _database.dispose();
+    _export.dispose();
     super.dispose();
   }
 
-  Future<void> _loadConfig() async {
-    _safeSetState(() {
+  Future<void> _load() async {
+    setState(() {
       _loading = true;
-      _message = null;
+      _error = null;
     });
     try {
       final response = await widget.controller.api.fetchConfig();
-      final data =
-          (response['data'] as Map?)?.cast<String, dynamic>() ?? const {};
-      final llm = data['llm'] as Map? ?? const {};
-      _safeSetState(() {
-        _configPath = response['path'] as String?;
-        _llmBaseCtrl.text = llm['base_url'] as String? ?? '';
-        _llmModelCtrl.text = llm['model'] as String? ?? '';
-        _llmKeyCtrl.text = llm['api_key'] as String? ?? '';
-      });
-    } catch (err) {
-      _safeSetState(() {
-        _message = err.toString();
-      });
-    } finally {
-      _safeSetState(() {
-        _loading = false;
-      });
-    }
-  }
-
-  Future<void> _updateLlm() async {
-    _safeSetState(() => _savingLlm = true);
-    try {
-      await widget.controller.api.updateConfig({
-        'llm': {
-          'base_url': _llmBaseCtrl.text,
-          'model': _llmModelCtrl.text,
-          'api_key': _llmKeyCtrl.text,
-          'temperature': _fixedTemperature,
-        },
-      });
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('LLM 设置已保存')));
-    } catch (err) {
-      _safeSetState(() => _message = err.toString());
+      final data = response['data'] as Map? ?? {};
+      _database.text = data['database_path']?.toString() ?? '';
+      _export.text = data['export_dir']?.toString() ?? '';
+    } catch (error) {
+      if (mounted) setState(() => _error = error.toString());
     } finally {
-      _safeSetState(() => _savingLlm = false);
+      if (mounted) setState(() => _loading = false);
     }
   }
 
-  Future<void> _testLlm() async {
-    _safeSetState(() {
-      _savingLlm = true;
+  Future<void> _connect() async {
+    final address = _address.text.trim();
+    final uri = Uri.tryParse(address);
+    if (uri == null ||
+        !const ['http', 'https'].contains(uri.scheme) ||
+        uri.host.isEmpty ||
+        uri.hasQuery ||
+        uri.hasFragment ||
+        uri.userInfo.isNotEmpty ||
+        (uri.path.isNotEmpty && uri.path != '/')) {
+      setState(() => _error = '请填写有效的后端地址，例如 http://127.0.0.1:8000。');
+      return;
+    }
+    widget.controller.setBaseUrl(address);
+    await widget.controller.ensureBackendReady();
+    if (!mounted) return;
+    await _load();
+  }
+
+  Future<void> _save() async {
+    if (_database.text.trim().isEmpty || _export.text.trim().isEmpty) {
+      setState(() => _error = '数据库位置和导出目录不能为空。');
+      return;
+    }
+    setState(() {
+      _saving = true;
+      _error = null;
       _message = null;
     });
     try {
-      final result = await widget.controller.api.testLlm(
-        baseUrl: _llmBaseCtrl.text,
-        model: _llmModelCtrl.text,
-        apiKey: _llmKeyCtrl.text,
-      );
-      _safeSetState(() {
-        _message =
-            result['message'] as String? ??
-            (result['success'] == true ? 'LLM 接口可用' : '测试失败');
+      await widget.controller.api.updateConfig({
+        'database_path': _database.text.trim(),
+        'export_dir': _export.text.trim(),
       });
-    } catch (err) {
-      _safeSetState(() => _message = err.toString());
+      widget.controller.notifyDataChanged();
+      if (mounted) setState(() => _message = '已保存。索引库和聊天记录页面可刷新查看当前数据库。');
+    } catch (error) {
+      if (mounted) setState(() => _error = error.toString());
     } finally {
-      _safeSetState(() => _savingLlm = false);
+      if (mounted) setState(() => _saving = false);
     }
   }
 
   @override
-  Widget build(BuildContext context) {
-    return PageContainer(
-      title: '设置',
-      subtitle: '配置大模型参数，所有配置写入 config.json（${_configPath ?? '--'}）。',
-      children: [
-        if (_loading)
-          const Padding(
-            padding: EdgeInsets.symmetric(vertical: 8),
-            child: LinearProgressIndicator(),
-          ),
-        SectionCard(
-          title: '大模型 API',
-          actions: [
-            TextButton.icon(
-              onPressed: _loading || _savingLlm ? null : _testLlm,
-              icon: const Icon(Icons.bolt),
-              label: const Text('测试连接'),
+  Widget build(BuildContext context) => PageContainer(
+    title: '设置',
+    subtitle: '连接后端服务，选择用于导入和检索的本地数据库。',
+    children: [
+      SectionCard(
+        title: '后端连接',
+        subtitle: '先运行 wxagent serve，再连接该服务。地址仅用于当前界面会话。',
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            TextField(
+              key: const ValueKey('settings-address'),
+              controller: _address,
+              enabled: !_loading && !_saving,
+              decoration: const InputDecoration(
+                labelText: '服务地址',
+                hintText: 'http://127.0.0.1:8000',
+              ),
+            ),
+            const SizedBox(height: 16),
+            OutlinedButton.icon(
+              onPressed: _loading || _saving ? null : _connect,
+              icon: const Icon(Icons.link_rounded),
+              label: const Text('连接服务'),
             ),
           ],
-          child: Column(
-            children: [
-              TextField(
-                controller: _llmBaseCtrl,
-                decoration: const InputDecoration(labelText: 'Base URL'),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _llmModelCtrl,
-                decoration: const InputDecoration(labelText: '模型名称'),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _llmKeyCtrl,
-                decoration: const InputDecoration(labelText: 'API Key'),
-                obscureText: true,
-              ),
-              const SizedBox(height: 12),
-              Align(
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  'Temperature 固定为 $_fixedTemperature，用于保证输出稳定。',
-                  style: TextStyle(color: Colors.grey.shade700),
+        ),
+      ),
+      SectionCard(
+        title: '存储位置',
+        subtitle: '路径位于后端电脑。更换数据库位置会切换索引库，不会搬迁或删除已有数据库。',
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (_loading) const LinearProgressIndicator(),
+            const SizedBox(height: 12),
+            TextField(
+              key: const ValueKey('settings-database'),
+              controller: _database,
+              enabled: !_loading && !_saving,
+              decoration: const InputDecoration(labelText: 'SQLite 数据库文件'),
+            ),
+            const SizedBox(height: 18),
+            TextField(
+              key: const ValueKey('settings-export'),
+              controller: _export,
+              enabled: !_loading && !_saving,
+              decoration: const InputDecoration(labelText: '默认 JSON 导出目录'),
+            ),
+            const SizedBox(height: 18),
+            Wrap(
+              spacing: 12,
+              runSpacing: 8,
+              children: [
+                ElevatedButton.icon(
+                  onPressed: _loading || _saving ? null : _save,
+                  icon: const Icon(Icons.save_outlined),
+                  label: Text(_saving ? '保存中…' : '保存设置'),
                 ),
-              ),
-              Align(
-                alignment: Alignment.centerRight,
-                child: ElevatedButton(
-                  onPressed: _loading || _savingLlm ? null : _updateLlm,
-                  child: _savingLlm
-                      ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            valueColor: AlwaysStoppedAnimation(Colors.white),
-                          ),
-                        )
-                      : const Text('保存 LLM 设置'),
-                ),
-              ),
-              if (_message != null) ...[
-                const SizedBox(height: 12),
-                Text(
-                  _message!,
-                  style: TextStyle(
-                    color: _message!.contains('可用')
-                        ? Colors.green
-                        : Colors.redAccent,
-                  ),
+                TextButton(
+                  onPressed: _loading || _saving ? null : _load,
+                  child: const Text('重新读取'),
                 ),
               ],
+            ),
+            if (_message != null) ...[
+              const SizedBox(height: 16),
+              Text(
+                _message!,
+                style: const TextStyle(color: WxAgentColors.success),
+              ),
             ],
-          ),
+          ],
         ),
-      ],
-    );
-  }
-
-  void _safeSetState(VoidCallback fn) {
-    if (!mounted) return;
-    setState(fn);
-  }
+      ),
+      if (_error != null)
+        SelectableText(
+          _error!,
+          style: const TextStyle(color: WxAgentColors.danger),
+        ),
+    ],
+  );
 }

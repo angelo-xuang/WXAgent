@@ -55,10 +55,27 @@ class BackendRuntime {
         p.join(directory, 'bin'),
       ]);
     }
-    final names = Platform.isWindows
-        ? const ['wxagent_backend.exe', 'wx_agent_backend.exe']
-        : const ['wxagent_backend', 'wx_agent_backend'];
     for (final directory in directories) {
+      // Windows ignores filename case: root WXAgent.exe is the GUI launcher.
+      // Discover the new CLI name only in backend/bin or an explicit directory.
+      final cliDirectory =
+          const [
+            'backend',
+            'bin',
+          ].contains(p.basename(directory).toLowerCase()) ||
+          (overrideDir != null &&
+              p.equals(p.absolute(directory), p.absolute(overrideDir)));
+      final names = Platform.isWindows
+          ? [
+              if (cliDirectory) 'wxagent.exe',
+              'wxagent_backend.exe',
+              'wx_agent_backend.exe',
+            ]
+          : [
+              if (cliDirectory) 'wxagent',
+              'wxagent_backend',
+              'wx_agent_backend',
+            ];
       for (final name in names) {
         final file = File(p.join(directory, name));
         if (await file.exists()) return file.absolute;
@@ -142,6 +159,15 @@ class AppController extends ChangeNotifier {
   int _generation = 0;
 
   WxAgentApiClient get api => _api;
+  int _dataRevision = 0;
+  int get dataRevision => _dataRevision;
+
+  void notifyDataChanged() {
+    if (_disposed) return;
+    _dataRevision++;
+    notifyListeners();
+  }
+
   String get baseUrl => _baseUrl;
   BackendState get backendState => _backendState;
   String? get backendMessage => _backendMessage;
@@ -151,6 +177,7 @@ class AppController extends ChangeNotifier {
     if (_disposed || normalized.isEmpty || normalized == _baseUrl) return;
     _generation++;
     _baseUrl = normalized;
+    _dataRevision++;
     _api.dispose();
     _api = _apiClientFactory(_baseUrl);
     if (_autoStartBackend) {
@@ -223,7 +250,7 @@ class AppController extends ChangeNotifier {
       if (executable == null) {
         _setBackendState(
           BackendState.failed,
-          '未找到 wxagent_backend.exe，请将其放在应用目录或设置 WX_AGENT_BACKEND_EXE。',
+          '未找到后端程序。请将 wxagent.exe 放在 backend 目录，或设置 WX_AGENT_BACKEND_EXE。',
         );
         return;
       }

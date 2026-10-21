@@ -13,12 +13,12 @@ import (
 
 // Store mirrors wx_agent.state.PipelineState for incremental tracking.
 type Store struct {
-	path            string
-	mu              sync.Mutex
-	loaded          bool
-	Sessions        map[string]SessionState `json:"sessions"`
-	SummarySessions map[string]SessionState `json:"summary_sessions,omitempty"`
-	Meta            map[string]string       `json:"meta"`
+	path     string
+	mu       sync.Mutex
+	loaded   bool
+	Sessions map[string]SessionState `json:"sessions"`
+	legacy   map[string]json.RawMessage
+	Meta     map[string]string `json:"meta"`
 }
 
 // SessionState captures the latest timestamp processed per session.
@@ -30,10 +30,10 @@ type SessionState struct {
 // New returns an empty Store bound to path.
 func New(path string) *Store {
 	return &Store{
-		path:            path,
-		Sessions:        make(map[string]SessionState),
-		SummarySessions: make(map[string]SessionState),
-		Meta:            make(map[string]string),
+		path:     path,
+		Sessions: make(map[string]SessionState),
+		legacy:   make(map[string]json.RawMessage),
+		Meta:     make(map[string]string),
 	}
 }
 
@@ -55,23 +55,26 @@ func (s *Store) Load() error {
 		}
 		return fmt.Errorf("read state: %w", err)
 	}
+	var legacy map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &legacy); err != nil {
+		return fmt.Errorf("parse state: %w", err)
+	}
+	if legacy == nil {
+		return fmt.Errorf("parse state: expected JSON object")
+	}
 	var payload struct {
-		Sessions        map[string]SessionState `json:"sessions"`
-		SummarySessions map[string]SessionState `json:"summary_sessions"`
-		Meta            map[string]string       `json:"meta"`
+		Sessions map[string]SessionState `json:"sessions"`
+		Meta     map[string]string       `json:"meta"`
 	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		return fmt.Errorf("parse state: %w", err)
 	}
-	s.Sessions, s.SummarySessions, s.Meta = payload.Sessions, payload.SummarySessions, payload.Meta
+	s.Sessions, s.Meta, s.legacy = payload.Sessions, payload.Meta, legacy
 	if s.Sessions == nil {
 		s.Sessions = make(map[string]SessionState)
 	}
 	if s.Meta == nil {
 		s.Meta = make(map[string]string)
-	}
-	if s.SummarySessions == nil {
-		s.SummarySessions = make(map[string]SessionState)
 	}
 	s.loaded = true
 	return nil
@@ -81,21 +84,31 @@ func (s *Store) Load() error {
 func (s *Store) Save() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.saveLocked(s.SummarySessions)
+	return s.saveLocked()
 }
 
-func (s *Store) saveLocked(summarySessions map[string]SessionState) error {
+func (s *Store) saveLocked() error {
 	if s.path == "" {
 		return errors.New("state path is empty")
 	}
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
 		return fmt.Errorf("create state dir: %w", err)
 	}
-	payload := struct {
-		Sessions        map[string]SessionState `json:"sessions"`
-		SummarySessions map[string]SessionState `json:"summary_sessions,omitempty"`
-		Meta            map[string]string       `json:"meta"`
-	}{Sessions: s.Sessions, SummarySessions: summarySessions, Meta: s.Meta}
+	// Retain old summary progress and any unknown fields without executing the
+	// removed feature or discarding data when native export progress is saved.
+	payload := make(map[string]json.RawMessage, len(s.legacy)+2)
+	for key, value := range s.legacy {
+		payload[key] = value
+	}
+	sessions, err := json.Marshal(s.Sessions)
+	if err != nil {
+		return err
+	}
+	meta, err := json.Marshal(s.Meta)
+	if err != nil {
+		return err
+	}
+	payload["sessions"], payload["meta"] = sessions, meta
 	raw, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode state: %w", err)
@@ -103,35 +116,6 @@ func (s *Store) saveLocked(summarySessions map[string]SessionState) error {
 	if err := atomicfile.Write(s.path, raw, 0o600); err != nil {
 		return fmt.Errorf("write state: %w", err)
 	}
-	return nil
-}
-
-// Summary progress is separate from export progress: exporting a message does
-// not mean it has been successfully summarized.
-func (s *Store) LastSummaryTimestamp(sessionID string) int64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.SummarySessions[sessionID].LastTimestamp
-}
-
-// CommitSummaries publishes in-memory progress only after the staged state file
-// has been saved. A failed summary or failed disk write remains retryable.
-func (s *Store) CommitSummaries(updates map[string]SessionState) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	staged := make(map[string]SessionState, len(s.SummarySessions)+len(updates))
-	for key, value := range s.SummarySessions {
-		staged[key] = value
-	}
-	for key, value := range updates {
-		if value.LastTimestamp >= staged[key].LastTimestamp {
-			staged[key] = value
-		}
-	}
-	if err := s.saveLocked(staged); err != nil {
-		return err
-	}
-	s.SummarySessions = staged
 	return nil
 }
 

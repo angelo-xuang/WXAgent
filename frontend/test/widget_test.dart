@@ -14,6 +14,9 @@ import 'package:wx_agent_app/src/services/wx_agent_api.dart';
 void main() {
   final requests = <http.Request>[];
   late AppController controller;
+  var failImport = false;
+  var failQuery = false;
+  var indexExists = true;
 
   setUpAll(() async {
     // Use the repository's Chinese font for realistic desktop layout coverage.
@@ -33,21 +36,35 @@ void main() {
 
   setUp(() {
     requests.clear();
+    failImport = false;
+    failQuery = false;
+    indexExists = true;
     controller = AppController(
       autoStartBackend: false,
       apiClientFactory: (url) => WxAgentApiClient(
         baseUrl: url,
         httpClient: MockClient((request) async {
           requests.add(request);
+          if ((failImport && request.url.path == '/index/import') ||
+              (failQuery && request.url.path == '/messages')) {
+            return http.Response(
+              jsonEncode({'error': '模拟错误：读取失败'}),
+              400,
+              headers: {'content-type': 'application/json; charset=utf-8'},
+            );
+          }
+          final offset =
+              int.tryParse(request.url.queryParameters['offset'] ?? '') ?? 0;
+          final total =
+              request.url.queryParameters['keyword'] == '不存在' || !indexExists
+              ? 0
+              : 75;
           final Object data = switch (request.url.path) {
             '/config' => {
               'data': {
                 'wechat_data_path': 'C:/preview/wechat',
                 'export_dir': 'C:/preview/exports',
-                'llm': {
-                  'base_url': 'https://example.invalid/v1',
-                  'model': 'demo-model',
-                },
+                'database_path': 'C:/preview/data/wxagent.db',
               },
               'path': 'preview/config.json',
             },
@@ -55,58 +72,52 @@ void main() {
               'platform': 'windows',
               'capabilities': {
                 'native_wechat': true,
-                'analyze_exports': true,
-                'filtered_export': false,
+                'query_messages': true,
+                'stats': true,
               },
-              'export': {'sessions': 0, 'messages': 0},
             },
-            '/analysis/sessions' => {
-              'top': [
-                {
-                  'session_id': 'preview-group',
-                  'display_name': '测试群聊（模拟数据）',
-                  'session_type': 'group',
-                  'messages': 30,
-                  'text_messages': 25,
-                  'active_days': 3,
-                },
-                {
-                  'session_id': 'preview-private',
-                  'display_name': '测试会话（模拟数据）',
-                  'session_type': 'private',
-                  'messages': 12,
-                  'text_messages': 12,
-                  'active_days': 2,
-                },
-              ],
-              'total_messages': 42,
-              'session_count': 2,
-              'breakdown': {'group': 1, 'private': 1},
-              'hourly_distribution': [
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                2,
-                4,
-                8,
-                5,
-                2,
-                0,
-                3,
-                2,
-                4,
-                2,
-                5,
-                3,
-                2,
-                0,
-                0,
-                0,
+            '/index/status' => {
+              'exists': indexExists,
+              'database_path': 'C:/preview/data/wxagent.db',
+              'messages': indexExists ? 75 : 0,
+              'sessions': indexExists ? 1 : 0,
+              'sources': indexExists ? 2 : 0,
+            },
+            '/index/import' => {
+              'files': 2,
+              'changed_files': 1,
+              'unchanged_files': 1,
+              'messages': 75,
+              'sessions': 1,
+              'database_path': 'C:/preview/data/wxagent.db',
+            },
+            '/sessions' =>
+              indexExists
+                  ? [
+                      {
+                        'session_id': 'preview-group',
+                        'display_name': '测试群聊（模拟数据）',
+                        'messages': 75,
+                      },
+                    ]
+                  : [],
+            '/messages' => {
+              'total': total,
+              'offset': offset,
+              'limit': 50,
+              'messages': [
+                for (var i = offset; i < offset + 50 && i < total; i++)
+                  {
+                    'session_id': 'preview-group',
+                    'display_name': '测试群聊（模拟数据）',
+                    'local_id': i + 1,
+                    'formatted_time': '2026-10-20 10:30:00',
+                    'type': 'text',
+                    'content': '会议原文第 ${i + 1} 条（模拟数据）',
+                    'sender_name': '示例成员',
+                    'sender': 'preview-user',
+                    'is_send': 0,
+                  },
               ],
             },
             _ => {'data': []},
@@ -163,7 +174,7 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      expect(find.text('把聊天，整理成有价值的信息'), findsOneWidget);
+      expect(find.text('让每一条记录，都能被找到'), findsOneWidget);
       expect(
         requests,
         isEmpty,
@@ -172,7 +183,7 @@ void main() {
       expect(tester.takeException(), isNull);
       await capture(tester, boundaryKey, 'home-${width.toInt()}');
 
-      for (final page in ['key', 'data', 'analysis', 'summary', 'settings']) {
+      for (final page in ['library', 'records', 'data', 'key', 'settings']) {
         await openPage(tester, page);
         expect(tester.takeException(), isNull, reason: '$page at $width');
         if (width == 1440 || width == 390) {
@@ -185,13 +196,14 @@ void main() {
     });
   }
 
-  testWidgets('home action opens connection page', (tester) async {
+  testWidgets('home action opens native capture page', (tester) async {
     tester.view.physicalSize = const Size(1440, 1000);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
     await tester.pumpWidget(WxAgentRoot(controller: controller));
     await tester.pumpAndSettle();
+    await tester.ensureVisible(find.byKey(const ValueKey('welcome-connect')));
     await tester.tap(find.byKey(const ValueKey('welcome-connect')));
     await tester.pumpAndSettle();
     expect(requests.any((request) => request.url.path == '/status'), isTrue);
@@ -208,14 +220,14 @@ void main() {
     await openPage(tester, 'settings');
     await tester.enterText(
       find.byType(TextField).first,
-      'https://my-model.invalid/v1',
+      'http://127.0.0.1:9000',
     );
     final before = requests
         .where((request) => request.url.path == '/config')
         .length;
     await openPage(tester, 'welcome');
     await openPage(tester, 'settings');
-    expect(find.text('https://my-model.invalid/v1'), findsOneWidget);
+    expect(find.text('http://127.0.0.1:9000'), findsOneWidget);
     expect(
       requests.where((request) => request.url.path == '/config').length,
       before,
@@ -232,7 +244,163 @@ void main() {
     addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
     await tester.pumpWidget(WxAgentRoot(controller: controller));
     await tester.pumpAndSettle();
-    expect(find.byKey(const ValueKey('welcome-connect')), findsOneWidget);
+    expect(find.byKey(const ValueKey('welcome-index')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    for (final page in ['library', 'records', 'settings']) {
+      await openPage(tester, page);
+      expect(
+        tester.takeException(),
+        isNull,
+        reason: '$page with large system text',
+      );
+    }
+  });
+  Future<void> startDesktop(WidgetTester tester) async {
+    tester.view.physicalSize = const Size(1440, 1000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(WxAgentRoot(controller: controller));
+    await tester.pumpAndSettle();
+  }
+
+  testWidgets(
+    'import sends selected directory and reports deduplicated result',
+    (tester) async {
+      await startDesktop(tester);
+      await openPage(tester, 'library');
+      await tester.enterText(
+        find.byKey(const ValueKey('index-directory')),
+        'C:/preview/new-records',
+      );
+      await tester.tap(find.byKey(const ValueKey('index-import')));
+      await tester.pumpAndSettle();
+      final imported = requests.lastWhere(
+        (item) => item.url.path == '/index/import',
+      );
+      expect(jsonDecode(imported.body), {
+        'export_dir': 'C:/preview/new-records',
+      });
+      expect(find.textContaining('更新 1 个，跳过 1 个'), findsOneWidget);
+      expect(find.text('索引库共 75 条记录、1 个会话。'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('import errors are visible without a false success message', (
+    tester,
+  ) async {
+    failImport = true;
+    await startDesktop(tester);
+    await openPage(tester, 'library');
+    await tester.tap(find.byKey(const ValueKey('index-import')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('模拟错误'), findsOneWidget);
+    expect(find.textContaining('导入完成：'), findsNothing);
+  });
+
+  testWidgets('query preserves applied filters across explicit pages', (
+    tester,
+  ) async {
+    await startDesktop(tester);
+    await openPage(tester, 'records');
+    await tester.tap(find.text('全部会话'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('测试群聊（模拟数据） (75)').last);
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const ValueKey('records-keyword')), '会议');
+    await tester.enterText(
+      find.byKey(const ValueKey('records-start')),
+      '2026-10-01',
+    );
+    await tester.enterText(
+      find.byKey(const ValueKey('records-end')),
+      '2026-10-22',
+    );
+    await tester.tap(find.byKey(const ValueKey('records-search')));
+    await tester.pumpAndSettle();
+    expect(find.text('会议原文第 1 条（模拟数据）'), findsOneWidget);
+    expect(find.text('显示 1–50 / 75'), findsNWidgets(2));
+    await tester.enterText(
+      find.byKey(const ValueKey('records-keyword')),
+      '尚未提交的修改',
+    );
+    await tester.ensureVisible(find.text('下一页').first);
+    await tester.tap(find.text('下一页').first);
+    await tester.pumpAndSettle();
+    final request = requests.lastWhere((item) => item.url.path == '/messages');
+    expect(request.url.queryParameters, {
+      'keyword': '会议',
+      'session_id': 'preview-group',
+      'start_date': '2026-10-01',
+      'end_date': '2026-10-22',
+      'offset': '50',
+      'limit': '50',
+    });
+    expect(find.text('显示 51–75 / 75'), findsNWidgets(2));
+    expect(find.text('会议原文第 51 条（模拟数据）'), findsOneWidget);
+    expect(find.text('会议原文第 1 条（模拟数据）'), findsNothing);
+  });
+
+  testWidgets('empty query and query failure show distinct states', (
+    tester,
+  ) async {
+    await startDesktop(tester);
+    await openPage(tester, 'records');
+    await tester.enterText(
+      find.byKey(const ValueKey('records-keyword')),
+      '不存在',
+    );
+    await tester.tap(find.byKey(const ValueKey('records-search')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('没有符合条件的记录'), findsOneWidget);
+    failQuery = true;
+    await tester.tap(find.byKey(const ValueKey('records-search')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('模拟错误'), findsOneWidget);
+    expect(find.textContaining('没有符合条件的记录'), findsNothing);
+  });
+
+  testWidgets('missing index guides users to import', (tester) async {
+    indexExists = false;
+    await startDesktop(tester);
+    await openPage(tester, 'records');
+    expect(find.text('还没有建立索引'), findsOneWidget);
+    expect(find.text('前往索引库'), findsOneWidget);
+  });
+
+  testWidgets('visited records reload after import or database change', (
+    tester,
+  ) async {
+    await startDesktop(tester);
+    await openPage(tester, 'records');
+    final before = requests
+        .where((item) => item.url.path == '/messages')
+        .length;
+    await openPage(tester, 'library');
+    await tester.tap(find.byKey(const ValueKey('index-import')));
+    await tester.pumpAndSettle();
+    expect(
+      requests.where((item) => item.url.path == '/messages').length,
+      before + 1,
+    );
+    await openPage(tester, 'settings');
+    await tester.enterText(
+      find.byKey(const ValueKey('settings-database')),
+      'C:/preview/other.db',
+    );
+    await tester.ensureVisible(find.text('保存设置'));
+    await tester.tap(find.text('保存设置'));
+    await tester.pumpAndSettle();
+    expect(
+      requests.where((item) => item.url.path == '/messages').length,
+      before + 2,
+    );
+    final saved = requests.lastWhere((item) => item.method == 'PUT');
+    expect((jsonDecode(saved.body) as Map)['values'], {
+      'database_path': 'C:/preview/other.db',
+      'export_dir': 'C:/preview/exports',
+    });
     expect(tester.takeException(), isNull);
   });
 }

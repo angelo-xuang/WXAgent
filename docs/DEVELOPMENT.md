@@ -1,22 +1,17 @@
-# 源码开发与质量检查
+# 开发与质量检查
 
-WXAgent 的主应用由 `frontend/`（Flutter 界面）、`backend/`（Go 数据服务）和 `launcher/`（桌面启动器）组成。`modules/` 保存独立的上游应用，不纳入本项目的批量格式化范围。
+主逻辑在 `backend/`，CLI 是主要产品入口；`frontend/` 是可选 Flutter GUI，`launcher/` 用于桌面进程管理。`modules/` 保存上游应用，不参与批量格式化。
 
-## 开发环境
+## 环境
 
-- Flutter **3.35.7**（包含 Dart **3.9.2**），与当前工程及 CI 保持一致。
-- Go **1.24.x** 或兼容版本；CI 使用 1.24 系列的最新补丁版本，满足 `backend/go.mod`。
-- Windows 使用 PowerShell；macOS / Linux 使用 Bash。
-- 将 Flutter 的 `bin` 和 Go 工具加入 `PATH`。
-- 原生桌面构建需要对应系统工具链：Windows 使用 Visual Studio C++ 桌面开发组件；macOS 使用 Xcode 和 CocoaPods。
+- CLI：Go 1.24 或兼容版本；CI 固定 Go 1.24 系列。
+- GUI：Flutter 3.35.7 / Dart 3.9.2，按 `pubspec.lock` 安装依赖。
+- Windows 桌面：Visual Studio C++ 桌面开发组件。
+- macOS 桌面：Xcode 与 CocoaPods；见 [Mac 说明](MACOS.md)。
 
-升级 SDK 时同时更新 CI、运行格式检查及回归测试。`frontend/pubspec.lock` 应提交版本控制，日常检查使用锁定依赖，不自动升级。
+## 格式与检查
 
-## 格式化与验收
-
-从仓库根目录执行。`format` 会修改自有源码；`check` 检查格式、静态分析和测试，失败会以非零状态退出。
-
-Windows：
+从仓库根目录执行：
 
 ```powershell
 ./scripts/dev.ps1 format
@@ -30,54 +25,54 @@ bash scripts/dev.sh format
 bash scripts/dev.sh check
 ```
 
-第二个参数可以选择 `go` 或 `flutter`，省略则检查两者，例如：
-
-```powershell
-./scripts/dev.ps1 check go
-./scripts/dev.ps1 check flutter
-```
-
-```bash
-bash scripts/dev.sh check go
-bash scripts/dev.sh check flutter
-```
-
-检查内容：
+第二个参数可选 `go` 或 `flutter`，仅使用 CLI 时运行 `./scripts/dev.ps1 check go` 或 `bash scripts/dev.sh check go` 即可。
 
 | 范围 | 格式化 | 检查 |
 | --- | --- | --- |
-| `backend/`、`launcher/` | `gofmt`，跳过 `vendor/` | `go test ./...`、`go vet ./...` |
-| `frontend/lib/`、`frontend/test/` | `dart format` | 格式差异、`flutter analyze`、`flutter test` |
+| backend、launcher | gofmt | go test、go vet |
+| frontend/lib、frontend/test | dart format | flutter analyze、flutter test |
 
-检查前会通过 `flutter pub get --enforce-lockfile` 准备依赖缓存。缓存和 Flutter 平台生成文件可能更新，但源码格式不会由 `check` 自动改写。
+`check` 不自动改写源码。Flutter 检查使用 `flutter pub get --enforce-lockfile`，不主动升级依赖。`.editorconfig` 和 `.gitattributes` 统一自有源码风格。
 
-`.editorconfig` 统一编辑器的缩进及文件末尾处理；`.gitattributes` 统一自有源码换行，并保留 Windows 批处理的 CRLF。无需对整个仓库运行换行重写或递归格式化命令。
-
-## 本地调试
-
-先启动后端，在另一个终端启动界面：
+## CLI 和服务调试
 
 ```bash
 cd backend
-go run ./cmd/wxagent_backend server
+go run ./cmd/wxagent help
+go run ./cmd/wxagent --config config.local.json init
+go run ./cmd/wxagent --config config.local.json --export-dir /path/to/exports import
+go run ./cmd/wxagent --config config.local.json messages --limit 50
+go run ./cmd/wxagent --config config.local.json serve
 ```
 
-```bash
-cd frontend
-flutter pub get --enforce-lockfile
-flutter run -d windows
-```
+`init` 仅执行一次，已有配置不覆盖。接口和存储约定见 [CLI 文档](CLI.md)。
 
-macOS 使用 `flutter run -d macos`；当前功能边界和准备步骤见 [macOS 开发说明](MACOS.md)。默认后端地址为 `http://127.0.0.1:8000`。
+另开终端进入 `frontend/`，运行 `flutter run -d windows` 或 `flutter run -d macos`。默认后端地址 `http://127.0.0.1:8000`；可以通过 `WXAGENT_BACKEND_URL` 传入其他本地服务地址。
 
-个人配置保存为 `backend/config.local.json`，不要把 API Key 或实际聊天路径写回公共示例配置。需要本地配置时，以 `go run ./cmd/wxagent_backend --config config.local.json server` 启动。不得提交聊天数据、导出内容、密钥、`.env` 或本机配置。
+GUI 自动寻找已编译后端时可用 `WX_AGENT_BACKEND_EXE` 指定可执行文件、`WX_AGENT_CONFIG` 指定配置。桌面启动器优先使用 `backend/wxagent.exe`（其他系统无扩展名），也兼容历史后端名称。Windows 不要用 CLI 替换包根目录的 `WXAgent.exe` 启动器。
 
-## GitHub 自动检查
+## 验收重点
 
-`.github/workflows/source-checks.yml` 在推送 `main`、提交 Pull Request 或手动触发时运行：
+使用临时目录和虚构聊天记录，禁止在测试中读取真实微信数据库或调用真实密钥组件。
 
-1. 在 Windows、Linux、macOS 检查 Go 格式、测试和 `vet`。
-2. 检查 Flutter 格式、静态分析和测试。
-3. 在 macOS 编译 Debug 界面工程，及时发现原生工程或插件接入错误。
+- 导入：重复导入幂等、变化文件增量更新、坏文件整批回滚、源文件保持不变。
+- 数据：同秒重复消息保留、会话和时间稳定排序、文字及日期筛选、全量与分页一致。
+- 隔离：只读查询不隐式导入或创建数据库；损坏数据库明确报错。
+- CLI：stdout 为可解析 JSON，stderr 为诊断，错误退出码正确；配置初始化不覆盖文件。
+- HTTP：参数校验与 CLI 一致，已移除 AI 路由不可调用。
+- GUI：多种窗口宽度、较大字体、过滤与分页、导入失败反馈及重连。
+- 采集：原有 Windows 采集入口只做模拟及平台边界测试，实机验证单独进行。
 
-该工作流只有仓库读取权限，不运行发布脚本、不创建标签、不上传安装包、不修改 GitHub Release。macOS Debug 编译通过仅表示界面工程能够构建，不代表微信读取、权限、签名或分发流程已经验收。
+需要排查并发时在 backend 运行 `go test -race ./...`。修改查询与持久化时优先测试数据不变量，不通过复制实现逻辑来构造断言。
+
+## GitHub 检查与发布边界
+
+`.github/workflows/source-checks.yml` 对 main 推送和 PR 执行：
+
+1. Windows / Linux / macOS 上的 Go 格式、测试和 vet。
+2. Flutter 格式、静态检查及组件测试。
+3. macOS Debug GUI 构建。
+
+工作流只有仓库读取权限，不发布包、不创建标签、不修改 Release。构建通过不等于完成 Mac 微信原始数据采集或签名分发验收。
+
+个人配置、聊天 JSON、SQLite 文件、密钥、`.env` 和本地生成目录不得提交。旧发布脚本和配置属于历史发布流程，当前 CLI 源码说明不要求重新打包。

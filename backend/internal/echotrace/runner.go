@@ -36,7 +36,7 @@ func (r *Runner) Run(extraArgs []string, silent bool) error {
 	// If silent, we might want to hide window on Windows, but for now just don't pipe stdout/stderr unless needed.
 	// Or maybe we want to pipe them to log?
 	if !silent {
-		cmd.Stdout = os.Stdout
+		cmd.Stdout = os.Stderr
 		cmd.Stderr = os.Stderr
 	}
 

@@ -7,7 +7,7 @@ import 'theme.dart';
 
 export 'services/app_controller.dart';
 
-enum WxAgentPage { welcome, key, data, analysis, summary, settings }
+enum WxAgentPage { welcome, library, records, data, key, settings }
 
 class NavigationController extends ChangeNotifier {
   WxAgentPage _page = WxAgentPage.welcome;
@@ -60,8 +60,8 @@ class _WxAgentHomeState extends State<WxAgentHome> {
     WxAgentPage.welcome => WelcomePage(controller: controller),
     WxAgentPage.key => KeyAcquisitionPage(controller: controller),
     WxAgentPage.data => ChatDataPage(controller: controller),
-    WxAgentPage.analysis => AnalysisPage(controller: controller),
-    WxAgentPage.summary => SummaryPage(controller: controller),
+    WxAgentPage.library => IndexPage(controller: controller),
+    WxAgentPage.records => RecordsPage(controller: controller),
     WxAgentPage.settings => SettingsPage(controller: controller),
   };
 
@@ -227,7 +227,7 @@ class NavigationSidebar extends StatelessWidget {
                         ),
                       ),
                       Text(
-                        '你的聊天数据工作台',
+                        '本地聊天记录索引库',
                         style: TextStyle(
                           fontSize: 11,
                           color: WxAgentColors.textSecondary,
@@ -350,11 +350,11 @@ class _NavItem {
 }
 
 const _navItems = [
-  _NavItem(WxAgentPage.welcome, Icons.space_dashboard_outlined, '工作台'),
+  _NavItem(WxAgentPage.welcome, Icons.space_dashboard_outlined, '概览'),
+  _NavItem(WxAgentPage.library, Icons.storage_rounded, '索引库'),
+  _NavItem(WxAgentPage.records, Icons.manage_search_rounded, '聊天记录'),
+  _NavItem(WxAgentPage.data, Icons.folder_open_rounded, '微信采集'),
   _NavItem(WxAgentPage.key, Icons.key_rounded, '连接微信'),
-  _NavItem(WxAgentPage.data, Icons.folder_open_rounded, '聊天数据'),
-  _NavItem(WxAgentPage.analysis, Icons.bar_chart_rounded, '数据分析'),
-  _NavItem(WxAgentPage.summary, Icons.auto_awesome_outlined, 'AI 总结'),
   _NavItem(WxAgentPage.settings, Icons.tune_rounded, '设置'),
 ];
 

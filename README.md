@@ -1,68 +1,72 @@
-# WXAgent 产品描述
+# WXAgent
 
-源码开发说明：[快速开始](QUICKSTART.md) · [格式化与测试](docs/DEVELOPMENT.md) · [macOS 适配边界](docs/MACOS.md)
+本地聊天记录索引库，CLI 优先，GUI 可选。
 
-`main` 用于源码开发。本次源码整理不更新 `v1.0.0` 标签、已有安装包或 GitHub Release。
+WXAgent 将已有聊天导出文件增量导入 SQLite，提供会话列表、原文检索、日期筛选和基础计数。记录保存在本机，命令行、桌面界面和本地 HTTP 接口使用同一个索引库。主应用不集成 AI 分析、AI 总结、提示词或模型服务配置。
 
-WXAgent 是一个本地运行的微信聊天数据整理与 AI 分析工具。它面向需要回顾、检索、归档和总结大量微信聊天记录的个人用户，帮助用户把分散在本机微信数据库里的信息转成可查看、可筛选、可总结的结构化资料。
+[快速开始](QUICKSTART.md) · [CLI 与数据约定](docs/CLI.md) · [开发与检查](docs/DEVELOPMENT.md) · [macOS](docs/MACOS.md) · [调用 Skill](skills/wxagent-index/SKILL.md)
 
-## 产品定位
+## 核心流程
 
-WXAgent 不是一个普通网页应用，也不是云端聊天记录托管服务。它的核心目标是：在用户自己的电脑上完成微信数据读取、密钥获取、数据库解密、聊天记录导出和本地分析，再根据用户配置调用大模型生成总结报告。
+```text
+已有聊天 JSON ── import ── SQLite 索引库 ── CLI / 本地 HTTP / 可选 GUI
+      ↑
+Windows 微信采集（可选）
+```
 
-这种设计适合处理微信这类强本地属性的数据：浏览器无法直接读取本机微信数据库，也无法调用本地解密组件；桌面端则可以在用户授权后完成完整流程。
+- **增量入库**：记录源文件指纹，重复导入跳过未变化文件；更新记录并保留历史。
+- **原文查询**：按会话 ID、日期和关键词过滤，返回带发送者与时间的结构化消息。
+- **本地存储**：SQLite 单文件数据库，不要求安装数据库服务或 Flutter。
+- **脚本集成**：查询结果以 JSON 写入标准输出，错误写入标准错误，适合管道及 Skill 调用。
+- **轻量 GUI**：管理索引、浏览记录、筛选原文，Windows 原生微信采集作为辅助入口。
+- **数据完整性**：一次导入失败时事务回滚；源文件消失不会自动删除索引内的历史记录。
 
-## 核心能力
+## 先用 CLI
 
-- 本地识别微信数据目录，读取本机聊天数据库。
-- 获取并使用本地数据库密钥，完成聊天记录解密。
-- 将聊天记录导出为 JSON，便于后续检索、备份和分析。
-- 按会话、时间范围、群聊或单聊筛选聊天记录。
-- 统计会话数量、消息数量、活跃会话和高频联系人。
-- 使用用户配置的大模型接口生成 Markdown 总结报告。
-- 支持自定义提示词，适配不同总结目标，例如待办提取、活动整理、招聘信息归纳、课程或项目讨论复盘。
-- 保存历史总结结果，方便回看和对比。
+仅需要 Go 1.24 或兼容版本。在仓库根目录执行：
 
-## 界面与工程结构
+```powershell
+cd backend
+go build -o wxagent.exe ./cmd/wxagent
+./wxagent.exe --config config.local.json init
+./wxagent.exe --config config.local.json --export-dir "D:/聊天导出" import
+./wxagent.exe --config config.local.json sessions
+./wxagent.exe --config config.local.json messages --keyword "项目" --limit 50
+```
 
-界面采用统一的浅色主题、中文字体与表单样式。宽窗口显示完整侧栏，中等窗口显示图标导航，窄窗口使用抽屉导航；页面按需加载，并保留切页前的筛选与输入。工作台提供连接、数据整理、统计和 AI 总结的直接入口。
+macOS / Linux 将构建产物改为 `wxagent`，运行 `./wxagent`。CLI 的导入、SQLite 索引和查询使用同一套 Go 实现；无需启动 GUI 或 HTTP 服务。
 
-后端启动及进程管理从界面组件中独立出来。Go 与 Dart 分别通过 `gofmt`、`dart format` 统一格式，源码检查覆盖静态分析、模拟服务测试与多尺寸界面测试。上游 `modules/` 保持独立，不做批量格式重写。
+`init` 只创建新配置，不覆盖已有文件。默认数据库为配置目录下的 `data/wxagent.db`。已有配置中的旧模型字段不会生效，新配置不包含这些字段。
 
-增量导出与增量总结分别记录进度，只有模型返回及报告写入成功后才提交总结进度。已有旧状态首次使用新的逐会话增量总结时，会重新处理一次导出记录，以建立独立的总结进度。
+## 可选界面与接口
 
-## 典型使用场景
+```powershell
+./wxagent.exe --config config.local.json serve --host 127.0.0.1 --port 8000
+```
 
-- 从大量微信群聊中提取近期重要通知、活动安排和待办事项。
-- 整理个人或团队在微信中的项目讨论记录。
-- 汇总招聘、实习、课程、社群和会议相关信息。
-- 将本地聊天记录导出为结构化文件，便于长期归档。
-- 用 AI 把零散聊天内容整理成可读的日报、周报或专题报告。
+然后在另一个终端进入 `frontend/`，运行 `flutter pub get --enforce-lockfile` 和 `flutter run -d windows`。Mac 使用 `flutter run -d macos`。
 
-## 隐私与数据边界
+桌面界面通过本地 HTTP 连接索引库。默认监听 `127.0.0.1:8000`，接口没有公网认证，按本地工具使用。面向助手的 [Skill](skills/wxagent-index/SKILL.md) 只说明如何调用 CLI，不给应用增加模型依赖。
 
-WXAgent 的读取、解密和导出流程在本地执行。默认情况下，导出的聊天数据保存在用户电脑上的 `output/` 目录，不上传到 WXAgent 自有服务器。
+## 源码结构
 
-如果用户启用 AI 总结功能，被选中的聊天内容会按照用户配置发送给对应的大模型服务商。使用前应确认所选模型服务的隐私政策，并避免处理未经授权或高度敏感的数据。
+| 目录 | 用途 |
+| --- | --- |
+| `backend/cmd/wxagent/` | 主要 CLI 入口 |
+| `backend/internal/cli/` | 命令解析与 JSON 输出 |
+| `backend/internal/dataset/` | JSON 解析、SQLite 索引、查询 |
+| `backend/internal/server/` | GUI 使用的本地 HTTP 接口 |
+| `frontend/` | 可选 Flutter 桌面界面 |
+| `launcher/` | 桌面打包启动器 |
+| `skills/wxagent-index/` | 外部助手调用约定 |
+| `modules/` | 历史上游微信组件 |
 
-## 当前产品形态
+`backend/cmd/wxagent_backend/` 保留为兼容入口，运行相同的 CLI。发布目录和上游模块不参与批量格式化。
 
-当前主线版本面向 Windows 桌面端：
+## 平台与版本边界
 
-- Flutter 负责桌面界面。
-- Go 后端负责配置、数据处理、导出、分析和 AI 总结。
-- `wx_key` 模块负责微信数据库密钥获取。
-- `echotrace` 模块负责聊天数据读取与导出。
-- `WXAgent.exe` 启动器负责同时拉起前端和本地后端。
+Windows 保留已有微信采集入口。macOS / Linux 可处理已导出的 JSON 并查询索引库；Mac 微信目录识别、密钥读取和原始数据库采集仍需单独适配。macOS GUI 工程由 CI 检查构建，尚未完成签名、安装包和实机采集验收。
 
-最终发布形态是一个 Windows 本地应用包，用户下载后双击 `WXAgent.exe` 即可运行。
+`main` 是当前源码主线，已有 `v1.0.0` Release 和安装包保留历史功能，本次源码改动不更新它们。新定位以本页及当前源码为准。
 
-## Web 与 macOS 规划
-
-纯 Web 版本无法完整替代桌面端，因为浏览器不能直接访问微信本地数据库，也不能执行本地解密组件。后续如果提供 Web 形态，更适合做成本地 Agent 加浏览器管理界面：核心能力仍在本机运行，界面可以在浏览器中打开。
-
-源码已加入 macOS Runner、网络及用户所选目录权限，并按后端能力控制原生功能入口。Go 服务与启动器支持 macOS 交叉编译，GitHub Actions 检查 macOS Debug 界面构建。微信数据目录识别、密钥获取、真实数据库接入、签名与安装包仍需单独实现及实机验证，当前不能视为完整的 Mac 版本。详见 [macOS 开发说明](docs/MACOS.md)。
-
-## 使用边界
-
-WXAgent 仅用于处理用户本人有权访问的聊天数据。请勿将它用于未授权的数据读取、隐私侵犯、账号攻击或任何违法违规用途。
+个人配置使用 `*.local.json`。聊天 JSON、SQLite 索引、密钥和本机配置不要提交到 Git；导入不会修改源聊天导出文件。

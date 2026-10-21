@@ -199,7 +199,7 @@ func executableName(name, goos string) string {
 
 func backendCandidates(baseDir, goos string) []string {
 	paths := []string{}
-	for _, name := range []string{"wxagent_backend", "wx_agent_backend"} {
+	for _, name := range []string{"wxagent", "wxagent_backend", "wx_agent_backend"} {
 		paths = append(paths, filepath.Join(baseDir, "backend", executableName(name, goos)))
 	}
 	for _, name := range []string{"wxagent_backend", "wx_agent_backend", "wx_agent"} {

@@ -1,5 +1,5 @@
 name: wx_agent_app
-description: "本地微信聊天记录整理、分析与 AI 总结桌面工具。"
+description: "本地聊天记录索引库的轻量桌面界面。"
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
@@ -40,8 +40,6 @@ dependencies:
 
   # Platform integration & utilities
   file_selector: ^1.0.3
-  url_launcher: ^6.3.1
-  intl: ^0.20.2
   path: ^1.9.0
 
 dev_dependencies:
