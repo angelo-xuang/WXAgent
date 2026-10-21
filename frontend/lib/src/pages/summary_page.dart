@@ -693,8 +693,12 @@ class _SummaryPageState extends State<SummaryPage>
                 ),
               ),
               AnimatedCrossFade(
-                firstChild: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+                firstChild: ExpansionTile(
+                  key: const PageStorageKey('default-summary-prompts'),
+                  tilePadding: EdgeInsets.zero,
+                  childrenPadding: const EdgeInsets.only(bottom: 12),
+                  title: const Text('查看默认提示词'),
+                  subtitle: const Text('已准备好常用总结规则，可展开查看'),
                   children: const [
                     _PromptPreview(
                       title: '默认分段提示词',

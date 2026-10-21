@@ -44,6 +44,7 @@ class SectionCard extends StatelessWidget {
           ],
         );
         final actionBar = Wrap(
+          alignment: compact ? WrapAlignment.start : WrapAlignment.end,
           spacing: 8,
           runSpacing: 8,
           children: actions ?? [],
@@ -72,7 +73,12 @@ class SectionCard extends StatelessWidget {
                       Expanded(child: heading),
                       if (actions?.isNotEmpty ?? false) ...[
                         const SizedBox(width: 20),
-                        Flexible(child: actionBar),
+                        Flexible(
+                          child: Align(
+                            alignment: Alignment.topRight,
+                            child: actionBar,
+                          ),
+                        ),
                       ],
                     ],
                   ),
